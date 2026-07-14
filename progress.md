@@ -110,4 +110,32 @@
 
 
 
-- [x] ���� fork main(9 commit,�� rebase ������� 2 commit);`gh workflow run` ʵ�� Windows Build:**�ɹ�**(18m49s,NSIS/MSI/��Я���������ϴ�,run 29335745521)�������� 14/15/16 ���
+- [x] 推送 fork main(9 commit,含 rebase 后的上游 2 commit);`gh workflow run` 实测 Windows Build:**成功**(18m49s,NSIS/MSI/便携版三产物上传,run 29335745521)——验收 14/15/16 完成
+
+## 阶段 F:Debian 无头版(分支 `debian-headless`)——架构勘察结论(2026-07-14)
+
+三份并行只读勘察(命令面 / 参考 TUI 可复用性 / 前端 IPC 面)+ tauri 2.10 crate 机制核查,结论:
+
+**命令面(288 个 Tauri 命令)**
+
+- 261 个(91%)仅依赖 4 个托管 State(AppState / SkillServiceState / CopilotAuthState / CodexOAuthState),可直接 HTTP 化;全 codebase **零 `ipc::Channel`**。
+- 仅 27 个非平凡:opener(6)、dialog(4)、updater(2)、store(2)、tray/window/lightweight(6)、桌面副作用(clipboard/terminal/auto-launch 等 6);全部可枚举、可 stub 或客户端替代。
+- 需 WS 桥的事件仅 **12 个,纯单向 server→client 推送**(前端只 listen 从不 emit)。
+
+**前端(React,零改动复用可行)**
+
+- `invoke` 是唯一符号、294 处调用、**无中间包装层** → 一个 Vite alias(`@tauri-apps/api/core`)全覆盖;`listen` 同理。
+- 仓库现成 `tests/msw/tauriMocks.ts` = 已验证的 HTTP invoke + 内存 listen shim,作浏览器 shim 模板。
+- 需浏览器替代的原生流(10 个):文件/目录选择器、导入导出、开文件夹/终端、`open_external`、窗口控制条。
+
+**Rust 无头化——头号风险与方案**
+
+- tauri 2.10:Linux 上 `webkit2gtk` 是 `optional`(挂 `wry`),`gtk` 是硬依赖;目标"无 WebKitGTK"= 去 `wry`/webkit,保留 tauri+gtk 链接(不调 `gtk::init` 即可无 X 载入)。
+- **裸 `AppHandle` = `AppHandle<Wry>`**:26 命令 + 4 处 service 存储点钉死 wry 运行时。
+- 方案:引入 `EventSink` trait,桌面 impl 包 `AppHandle`、无头 impl 包 `broadcast::Sender`(→ WS);核心与运行时解耦。
+- Cargo:`default = ["gui"]` 收纳 wry/tray/webkit/plugins(桌面构建字节级不变);`headless` = axum + argon2 + `tauri/test`,新增第二 `[[bin]]`。
+
+**参考 cc-switch-cli 复用度**
+
+- clap CLI + ratatui 渲染层 near-verbatim;数据/动作层(~17K LOC)需适配目标新签名(`AppState::new`、无 `state.config`、`add` 多参、`switch` 返回 `SwitchResult`、`AppType::ClaudeDesktop` 新臂)。
+- **daemon supervisor(1860 LOC)丢弃**(绑死旧多 worker 代理模型);无头改用 axum + systemd `Restart=always`。
