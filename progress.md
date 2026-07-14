@@ -75,4 +75,13 @@
 - [x] `tests/integration/App.test.tsx` 单文件 4/4 通过
 - [x] 全量 `pnpm test:unit`:443/446,其余 3 个失败为 **上游既有的本机并行 flaky**(已用纯净 c8b0d60c 基线工作树复现同样 3 个失败;单跑该文件全通过),非本次改动引入
 
+## 阶段 D:GitHub Actions Windows 自动构建 ✅(2026-07-14,待推送后实测)
+
+- [x] 新增 `.github/workflows/windows-build.yml`:`workflow_dispatch` + `push`(main)触发;windows-2022;Node 20 + pnpm 10.12.3(pnpm store 缓存)+ dtolnay/rust-toolchain@stable + Swatinem/rust-cache
+- [x] 构建命令 `pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}' --bundles nsis,msi`——内联覆盖关闭 updater 签名产物(fork 无 TAURI_SIGNING_PRIVATE_KEY),绕开上游 release.yml 的密钥依赖
+- [x] 产物上传:NSIS 安装包 / MSI 安装包 / 便携版 exe(actions/upload-artifact@v4,if-no-files-found: error)
+- [x] 公共仓库 GitHub 托管 runner 免费;上游 ci.yml / release.yml 原样保留
+- [ ] 推送后 `gh workflow run` + `gh run watch` 实测一次成功构建(阶段 E 推送后执行)
+
+
 
