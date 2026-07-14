@@ -18,6 +18,17 @@
 
 </div>
 
+## 🔀 关于本 Fork
+
+本仓库 fork 自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，在上游 v3.17.0 基础上新增以下功能：
+
+- **CodexCont 推理自动续写** — 在 `设置 → 路由 → CodexCont` 下新增开关，可在 `/v1/responses` 的原生 Responses 链上自动续写被截断的推理。仅在不会触发 Responses→Chat/Anthropic 转换时启用，并完全复用现有的供应商转发/路由/重试/故障转移链路——不绕过、不锁定供应商。
+- **顶部应用切换栏** — 自动隐藏未安装的工具，并修复非全屏宽度下右侧动作按钮被挤出屏幕的问题。
+- **检测文案本地化** — `not installed or not executable` 现在会按当前界面语言显示。
+- **工具官网链接** — 每个工具名称旁新增快捷按钮，可打开其官方网站。
+- **更新 Windows 安装命令** — 各工具的一键安装命令已更新为当前版本。
+- **免费 Windows 自动构建** — 新增 GitHub Actions 工作流（`workflow_dispatch` + push），在免费的 GitHub 托管 runner 上构建 NSIS / MSI / 便携版产物。
+
 ## ❤️赞助商
 
 > [想出现在这里？](mailto:farion1231@gmail.com)

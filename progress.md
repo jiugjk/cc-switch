@@ -100,6 +100,13 @@
 - [x] `cargo check` / `cargo fmt --check` / `pnpm typecheck` 通过;`pnpm build:renderer` 成功且确认 recharts/flexsearch 均已移出首屏 chunk
 - [x] `tests/integration/App.test.tsx` 单文件 4/4 通过(懒加载下 Suspense 行为正常);全量 444/446,失败仍为同一上游 flaky 文件
 
+## 阶段 E:同步上游 + README + 推送(2026-07-14)
+
+- [x] 用户在 GitHub 侧同步 fork(上游新增 2 commit:`9ca1a41f` 函数参数 type 归一化为 object、`6d316c0b` Chat→Responses 工具调用身份/顺序修复);两者仅触碰 `proxy/providers/{transform,streaming}_codex_chat.rs`,与本 fork 改动零文件重叠,且属于 CodexCont 门控主动排除的转换路径,功能正交
+- [x] 本地 `git rebase origin/main` 干净完成(6 commit 无冲突重放)
+- [x] rebase 后右量验证:`codex_continue` 7/7、上游新测 `streaming_codex_chat` 19/19 + `transform_codex_chat` 52/52 通过;`sqlite_home` 2 个失败确认为本机 `CODEX_API_KEY` + 真实 Codex 安装所致的环境噪音(单线程仍失败,非并行 flaky,基线同样失败,且位于未改动文件)
+- [x] README.md / README_ZH.md 顶部新增"关于本 Fork"一节(CodexCont、切换栏、i18n、官网链接、安装命令、Windows CI 六项)
+
 
 
 

@@ -18,6 +18,17 @@ English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_
 
 </div>
 
+## 🔀 About This Fork
+
+This repository is a fork of [farion1231/cc-switch](https://github.com/farion1231/cc-switch) that adds the following on top of upstream v3.17.0:
+
+- **CodexCont reasoning auto-continuation** — A new toggle under `Settings → Routing → CodexCont` automatically continues truncated reasoning on `/v1/responses` native Responses chains. It engages only when it will not trigger a Responses→Chat/Anthropic conversion, and fully reuses the existing provider forwarding/routing/retry/failover path — no bypass, no pinned provider.
+- **Top app switcher** — Auto-hides uninstalled tools and fixes the right-side action buttons being pushed off-screen at non-fullscreen widths.
+- **Localized environment-check text** — `not installed or not executable` now displays in the active UI language.
+- **Tool website links** — Each tool name gets a shortcut button that opens its official website.
+- **Updated Windows install commands** — The per-tool one-click install commands were refreshed to their current forms.
+- **Free Windows auto-build** — A new GitHub Actions workflow (`workflow_dispatch` + push) builds the NSIS / MSI / portable artifacts on free GitHub-hosted runners.
+
 ## ❤️Sponsor
 
 > [Want to appear here?](mailto:farion1231@gmail.com)
