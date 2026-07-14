@@ -799,9 +799,15 @@ pub async fn handle_responses(
     } else {
         body.clone()
     };
-    let original_body = initial_body.clone();
-    let original_headers = headers.clone();
-    let original_extensions = extensions.clone();
+    // 这三个原始副本仅在下方 `codex_continue_enabled && response.is_sse()` 的折叠分支里
+    // 被读取(续写往轮需要重放原始 body/headers/extensions)。CodexCont 未启用时(全局关闭、
+    // 非流式、reasoning:false,或候选链含转换型 Provider)折叠分支永不进入,此时避免这三次
+    // 克隆——尤其 initial_body 是携带完整会话历史的 Value,克隆代价可观。
+    let (original_body, original_headers, original_extensions) = if codex_continue_enabled {
+        (initial_body.clone(), headers.clone(), extensions.clone())
+    } else {
+        Default::default()
+    };
 
     let is_stream = body
         .get("stream")

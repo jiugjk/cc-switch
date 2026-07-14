@@ -83,5 +83,23 @@
 - [x] 公共仓库 GitHub 托管 runner 免费;上游 ci.yml / release.yml 原样保留
 - [ ] 推送后 `gh workflow run` + `gh run watch` 实测一次成功构建(阶段 E 推送后执行)
 
+## 阶段 C:性能与内存优化(保守) ✅(2026-07-14)
+
+方法:并行只读审计 workflow(3 个审计 agent:前端 bundle / Rust 热路径 / 内存增长)+ 每项发现独立对抗验证 agent;仅采纳验证通过的高置信改动。审计结论:所有长生命周期结构均已有界(无内存风险发现);1 项前端提案因前提错误被否决(相关依赖本就被急切锚定)。
+
+采纳并落地 3 项:
+
+- [x] **SettingsPage 懒加载**(src/App.tsx):`React.lazy` + 动态 import;SettingsPage 是 recharts(装机 7.4MB)+ victory-vendor + 11 个 d3-* 包的唯一引用链(经 UsageDashboard→UsageTrendChart),仅在用户显式打开设置时挂载。构建实测:主 chunk 拆出 564KB 的 SettingsPage chunk,recharts 已不在首屏 index chunk
+- [x] **SessionManagerPage 懒加载**(src/App.tsx):同法;flexsearch + 1742 行会话管理子树拆出 112KB chunk,首屏不再包含
+- [x] 两个懒组件共用 `<Suspense fallback={null}>` 边界,置于 currentView keyed、0.2s 渐入的 motion.div 内——chunk 加载空档被既有过渡动画掩盖,AnimatePresence 退出动画不受影响;Tauri 本地资源加载亚帧级
+- [x] **Rust 热路径克隆消除**(proxy/handlers.rs handle_responses):`original_body/headers/extensions` 三个克隆改为仅在 `codex_continue_enabled` 时才执行(它们只被折叠分支读取)。CodexCont 不生效的每个 /v1/responses 请求(全局关闭/非流式/reasoning:false/候选链含转换 Provider)省去一次完整请求体 Value 克隆 + HeaderMap/Extensions 克隆;启用路径字节级不变
+- [x] 不改 `[profile.release]`(opt-level="s"/thin LTO/codegen-units=1/strip 已是优化配置;panic=unwind 为 panic 钩子依赖,红线不动);vite 默认分包已足够,未加 manualChunks
+
+验证:
+
+- [x] `cargo check` / `cargo fmt --check` / `pnpm typecheck` 通过;`pnpm build:renderer` 成功且确认 recharts/flexsearch 均已移出首屏 chunk
+- [x] `tests/integration/App.test.tsx` 单文件 4/4 通过(懒加载下 Suspense 行为正常);全量 444/446,失败仍为同一上游 flaky 文件
+
+
 
 
