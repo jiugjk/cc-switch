@@ -386,6 +386,18 @@
         "mediaHeuristic": "Text-Only Model Preflight",
         "mediaHeuristicDescription": "Before sending, strips images for models in the built-in confirmed text-only registry. Turning this off only disables the proxy's registry-based preflight; declared text-only handling and upstream-error fallback remain, and Codex model-catalog capability declarations are unchanged"
       },
+      "codexContinue": {
+        "title": "Codex Reasoning Auto-Continuation (CodexCont)",
+        "description": "Preserves encrypted reasoning on native /v1/responses and automatically continues truncated reasoning through the existing routing and failover chain.",
+        "enabled": "Enable Auto-Continuation",
+        "enabledDescription": "When disabled, Codex requests still go through CC Switch routing, but CodexCont folding continuation is skipped.",
+        "maxContinuations": "Max continuation rounds",
+        "step": "Truncation step",
+        "marker": "Continuation prompt",
+        "markerDescription": "Sent to trigger the next reasoning continuation round; environment variables can still temporarily override these parameters.",
+        "enabledToast": "CodexCont auto-continuation enabled",
+        "disabledToast": "CodexCont auto-continuation disabled"
+      },
       "optimizer": {
         "title": "Bedrock Request Optimizer",
         "description": "Automatically optimize Thinking and Cache configuration before sending requests (only applies to Bedrock providers)",

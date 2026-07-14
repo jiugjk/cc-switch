@@ -386,6 +386,18 @@
         "mediaHeuristic": "純文字模型預判",
         "mediaHeuristicDescription": "傳送前依內建的已確認純文字模型登錄表移除圖片。關閉只會停用代理的登錄表預判；已宣告純文字模型的處理與上游錯誤兜底仍會保留，且不會改變 Codex 模型目錄的能力宣告"
       },
+      "codexContinue": {
+        "title": "Codex reasoning 自動續寫（CodexCont）",
+        "description": "保留 native /v1/responses 的 encrypted reasoning，並在截斷時繼續走目前路由與故障轉移鏈自動續寫。",
+        "enabled": "啟用自動續寫",
+        "enabledDescription": "關閉後 Codex 請求仍透過 CC Switch 路由，但不再做 CodexCont 摺疊續寫。",
+        "maxContinuations": "最大續寫輪數",
+        "step": "截斷步長",
+        "marker": "續寫提示",
+        "markerDescription": "用於觸發下一輪 reasoning continuation；環境變數仍可暫時覆蓋這些參數。",
+        "enabledToast": "CodexCont 自動續寫已啟用",
+        "disabledToast": "CodexCont 自動續寫已關閉"
+      },
       "optimizer": {
         "title": "Bedrock 請求最佳化工具",
         "description": "在請求發送前自動最佳化 Thinking 和 Cache 設定（僅 Bedrock 供應商生效）",

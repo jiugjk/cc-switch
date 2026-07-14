@@ -386,6 +386,18 @@
         "mediaHeuristic": "纯文本模型预判",
         "mediaHeuristicDescription": "发送前根据内置的已确认纯文本模型注册表剥离图片。关闭仅停用代理的注册表预判；已声明纯文本模型的处理和上游报错兜底仍保留，且不会改变 Codex 模型目录的能力声明"
       },
+      "codexContinue": {
+        "title": "Codex reasoning 自动续写（CodexCont）",
+        "description": "保留 native /v1/responses 的 encrypted reasoning，并在截断时继续走当前路由与故障转移链自动续写。",
+        "enabled": "启用自动续写",
+        "enabledDescription": "关闭后 Codex 请求仍通过 CC Switch 路由，但不再做 CodexCont 折叠续写。",
+        "maxContinuations": "最大续写轮数",
+        "step": "截断步长",
+        "marker": "续写提示",
+        "markerDescription": "用于触发下一轮 reasoning continuation；环境变量仍可临时覆盖这些参数。",
+        "enabledToast": "CodexCont 自动续写已启用",
+        "disabledToast": "CodexCont 自动续写已关闭"
+      },
       "optimizer": {
         "title": "Bedrock 请求优化器",
         "description": "在请求发送前自动优化 Thinking 和 Cache 配置（仅 Bedrock 供应商生效）",

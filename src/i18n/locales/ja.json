@@ -386,6 +386,18 @@
         "mediaHeuristic": "テキスト専用モデルの事前判定",
         "mediaHeuristicDescription": "送信前に、内蔵の確認済みテキスト専用モデル登録に基づいて画像を除去します。オフにしても無効になるのはプロキシの登録ベース事前処理だけで、宣言済みテキスト専用モデルの処理と上流エラー時のフォールバックは残り、Codex モデルカタログの能力宣言は変わりません"
       },
+      "codexContinue": {
+        "title": "Codex reasoning 自動継続（CodexCont）",
+        "description": "ネイティブ /v1/responses の encrypted reasoning を保持し、切断時には既存のルーティングとフェイルオーバーチェーンで自動継続します。",
+        "enabled": "自動継続を有効化",
+        "enabledDescription": "無効にしても Codex リクエストは CC Switch のルーティングを通りますが、CodexCont の折りたたみ継続は行われません。",
+        "maxContinuations": "最大継続ラウンド数",
+        "step": "切断ステップ",
+        "marker": "継続プロンプト",
+        "markerDescription": "次の reasoning continuation を促すために送信されます。環境変数でこれらのパラメータを一時的に上書きできます。",
+        "enabledToast": "CodexCont 自動継続を有効にしました",
+        "disabledToast": "CodexCont 自動継続を無効にしました"
+      },
       "optimizer": {
         "title": "Bedrock リクエストオプティマイザー",
         "description": "リクエスト送信前に Thinking と Cache の設定を自動最適化（Bedrock プロバイダーのみ有効）",

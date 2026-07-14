@@ -1230,6 +1230,8 @@ pub fn run() {
             commands::set_optimizer_config,
             commands::get_copilot_optimizer_config,
             commands::set_copilot_optimizer_config,
+            commands::get_codex_continue_config,
+            commands::set_codex_continue_config,
             commands::get_log_config,
             commands::set_log_config,
             commands::restart_app,
