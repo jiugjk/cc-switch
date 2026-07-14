@@ -41,6 +41,11 @@ const success = <T>(payload: T) => HttpResponse.json(payload as any);
 
 export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_migration_result`, () => success(false)),
+  // 顶部切换栏启动探测：空结果 = 全部按已安装处理（不隐藏任何应用），保持既有测试语义。
+  http.post(`${TAURI_ENDPOINT}/get_tool_versions`, () => success([])),
+  http.post(`${TAURI_ENDPOINT}/is_claude_desktop_installed`, () =>
+    success(true),
+  ),
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
     success(null),
   ),

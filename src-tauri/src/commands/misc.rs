@@ -153,7 +153,11 @@ fn tool_env_type_and_wsl_distro(_tool: &str) -> (String, Option<String>) {
 pub async fn get_tool_versions(
     tools: Option<Vec<String>>,
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
+    include_latest: Option<bool>,
 ) -> Result<Vec<ToolVersion>, String> {
+    // include_latest=false 时跳过 npm/github/pypi 最新版本网络查询，只做本地探测：
+    // 供启动时顶部切换栏的"已安装"检测使用，避免每次启动都发 6 个网络请求。
+    let include_latest = include_latest.unwrap_or(true);
     let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
         let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
         VALID_TOOLS
@@ -171,7 +175,10 @@ pub async fn get_tool_versions(
         let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
         let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
 
-        results.push(get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag).await);
+        results.push(
+            get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag, include_latest)
+                .await,
+        );
     }
 
     Ok(results)
@@ -715,6 +722,7 @@ async fn get_single_tool_version_impl(
     tool: &str,
     wsl_shell: Option<&str>,
     wsl_shell_flag: Option<&str>,
+    include_latest: bool,
 ) -> ToolVersion {
     debug_assert!(
         VALID_TOOLS.contains(&tool),
@@ -756,24 +764,28 @@ async fn get_single_tool_version_impl(
     // 2. 获取远程最新版本（npm 工具在本地领先 latest 时会按预发布通道补查，见
     //    fetch_npm_latest_for_tool / npm_prerelease_tags）
     let local = local_version.as_deref();
-    let latest_version = match tool {
-        "claude" => {
-            fetch_npm_latest_for_tool(&client, "@anthropic-ai/claude-code", tool, local).await
-        }
-        "codex" => fetch_npm_latest_for_tool(&client, "@openai/codex", tool, local).await,
-        "gemini" => fetch_npm_latest_for_tool(&client, "@google/gemini-cli", tool, local).await,
-        "opencode" => {
-            if let Some(version) =
-                fetch_npm_latest_for_tool(&client, "opencode-ai", tool, local).await
-            {
-                Some(version)
-            } else {
-                fetch_github_latest_version(&client, "anomalyco/opencode").await
+    let latest_version = if !include_latest {
+        None
+    } else {
+        match tool {
+            "claude" => {
+                fetch_npm_latest_for_tool(&client, "@anthropic-ai/claude-code", tool, local).await
             }
+            "codex" => fetch_npm_latest_for_tool(&client, "@openai/codex", tool, local).await,
+            "gemini" => fetch_npm_latest_for_tool(&client, "@google/gemini-cli", tool, local).await,
+            "opencode" => {
+                if let Some(version) =
+                    fetch_npm_latest_for_tool(&client, "opencode-ai", tool, local).await
+                {
+                    Some(version)
+                } else {
+                    fetch_github_latest_version(&client, "anomalyco/opencode").await
+                }
+            }
+            "openclaw" => fetch_npm_latest_for_tool(&client, "openclaw", tool, local).await,
+            "hermes" => fetch_pypi_latest_version(&client, "hermes-agent").await,
+            _ => None,
         }
-        "openclaw" => fetch_npm_latest_for_tool(&client, "openclaw", tool, local).await,
-        "hermes" => fetch_pypi_latest_version(&client, "hermes-agent").await,
-        _ => None,
     };
 
     ToolVersion {

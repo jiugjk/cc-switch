@@ -199,22 +199,66 @@ function App() {
     hermes: true,
   };
 
+  // 顶部切换栏「已安装且可用」检测：启动时后台探测一次（仅本地 --version 探测，
+  // 不查 latest 版本、无网络请求）。结果返回前 installedApps 为 null → 按 visibleApps
+  // 原样显示，避免先显示后隐藏的闪烁反转；探测失败也保持 null——宁可多显示，不误隐藏。
+  const [installedApps, setInstalledApps] = useState<Partial<
+    Record<AppId, boolean>
+  > | null>(null);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const [tools, desktopInstalled] = await Promise.all([
+          settingsApi.getToolVersions(undefined, undefined, false),
+          // Claude Desktop 无 CLI，可用性以配置目录存在与否近似；探测异常时视为已安装。
+          settingsApi.isClaudeDesktopInstalled().catch(() => true),
+        ]);
+        if (!active) return;
+        const next: Partial<Record<AppId, boolean>> = {
+          "claude-desktop": desktopInstalled,
+        };
+        for (const tool of tools) {
+          next[tool.name as AppId] = Boolean(tool.version);
+        }
+        setInstalledApps(next);
+      } catch (error) {
+        console.error("[App] Failed to detect installed tools", error);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // 最终展示 = 用户可见性设置 ∧ 本地已安装。未知(探测未返回/字段缺失)按已安装处理。
+  const shownApps: VisibleApps = useMemo(() => {
+    if (!installedApps) return visibleApps;
+    const merged = { ...visibleApps };
+    for (const app of Object.keys(merged) as AppId[]) {
+      merged[app] = merged[app] && installedApps[app] !== false;
+    }
+    return merged;
+    // visibleApps 每次渲染都是新对象（settingsData 兜底展开），依赖其字段序列化值即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(visibleApps), installedApps]);
+
   const getFirstVisibleApp = (): AppId => {
-    if (visibleApps.claude) return "claude";
-    if (visibleApps["claude-desktop"]) return "claude-desktop";
-    if (visibleApps.codex) return "codex";
-    if (visibleApps.gemini) return "gemini";
-    if (visibleApps.opencode) return "opencode";
-    if (visibleApps.openclaw) return "openclaw";
-    if (visibleApps.hermes) return "hermes";
+    if (shownApps.claude) return "claude";
+    if (shownApps["claude-desktop"]) return "claude-desktop";
+    if (shownApps.codex) return "codex";
+    if (shownApps.gemini) return "gemini";
+    if (shownApps.opencode) return "opencode";
+    if (shownApps.openclaw) return "openclaw";
+    if (shownApps.hermes) return "hermes";
     return "claude"; // fallback
   };
 
   useEffect(() => {
-    if (!visibleApps[activeApp]) {
+    if (!shownApps[activeApp]) {
       setActiveApp(getFirstVisibleApp());
     }
-  }, [visibleApps, activeApp]);
+  }, [shownApps, activeApp]);
 
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {
@@ -1393,7 +1437,7 @@ function App() {
                     <AppSwitcher
                       activeApp={activeApp}
                       onSwitch={setActiveApp}
-                      visibleApps={visibleApps}
+                      visibleApps={shownApps}
                       compact={isToolbarCompact}
                     />
 

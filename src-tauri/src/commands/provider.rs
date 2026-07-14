@@ -166,6 +166,13 @@ pub fn get_claude_desktop_default_routes(
     crate::claude_desktop_config::default_proxy_routes()
 }
 
+/// 检测 Claude Desktop 是否安装（配置目录存在与否的轻量只读检查），
+/// 供顶部应用切换栏自动隐藏未安装应用。
+#[tauri::command]
+pub fn is_claude_desktop_installed() -> bool {
+    crate::claude_desktop_config::is_installed()
+}
+
 #[tauri::command]
 pub fn import_claude_desktop_providers_from_claude(
     state: State<'_, AppState>,

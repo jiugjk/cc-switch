@@ -239,6 +239,7 @@ export const settingsApi = {
       string,
       { wslShell?: string | null; wslShellFlag?: string | null }
     >,
+    includeLatest?: boolean,
   ): Promise<
     Array<{
       name: string;
@@ -250,7 +251,15 @@ export const settingsApi = {
       wsl_distro: string | null;
     }>
   > {
-    return await invoke("get_tool_versions", { tools, wslShellByTool });
+    return await invoke("get_tool_versions", {
+      tools,
+      wslShellByTool,
+      includeLatest,
+    });
+  },
+
+  async isClaudeDesktopInstalled(): Promise<boolean> {
+    return await invoke("is_claude_desktop_installed");
   },
 
   async runToolLifecycleAction(

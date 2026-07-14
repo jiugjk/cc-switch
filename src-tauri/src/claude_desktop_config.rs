@@ -213,6 +213,21 @@ pub fn get_config_library_path() -> Result<PathBuf, AppError> {
     Ok(current_platform_paths()?.config_library_path)
 }
 
+/// 轻量只读检测：本机是否有 Claude Desktop 安装痕迹（其配置目录是否存在）。
+/// 仅做文件系统存在性检查、不读取文件内容，供顶部应用切换栏自动隐藏未安装应用。
+/// Claude Desktop 无 CLI 可探测版本，配置目录存在与否是最接近的安装信号。
+pub fn is_installed() -> bool {
+    if !is_supported_platform() {
+        return false;
+    }
+    current_platform_paths()
+        .map(|paths| {
+            paths.normal_config_path.parent().is_some_and(Path::exists)
+                || paths.threep_config_path.parent().is_some_and(Path::exists)
+        })
+        .unwrap_or(false)
+}
+
 pub fn default_proxy_routes() -> Vec<ClaudeDesktopDefaultRoute> {
     DEFAULT_PROXY_ROUTES.to_vec()
 }

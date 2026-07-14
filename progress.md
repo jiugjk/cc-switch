@@ -47,3 +47,32 @@
 - [x] `cargo test --lib codex_continue`:7/7 通过
 - [x] `pnpm typecheck` 通过(注:本机 pnpm 11 会在 install 时往 pnpm-workspace.yaml 写入 `allowBuilds` 占位符并使脚本前置校验失败,已在本机全局设 `verify-deps-before-run=false` 并还原该文件,仓库不带此噪音)
 
+## 阶段 B:UI 修复 ✅(2026-07-14)
+
+1. 顶部应用切换栏(验收 9/10):
+
+- [x] 后端:`get_tool_versions` 新增 `include_latest`(默认 true)参数,false 时跳过 npm/github/pypi 最新版本网络查询,只做本地探测——供启动检测复用同一入口且零网络开销
+- [x] 后端:`claude_desktop_config::is_installed()`(配置目录存在性轻量只读检查,Claude Desktop 无 CLI 可探测)+ 新命令 `is_claude_desktop_installed`(commands/provider.rs,lib.rs 已注册)
+- [x] 前端 App.tsx:启动后台探测一次(`getToolVersions(…, includeLatest=false)` + `isClaudeDesktopInstalled`);`shownApps = visibleApps ∧ installed`;探测返回前按 visibleApps 原样显示避免闪烁,探测失败宁可多显示不误隐藏;activeApp 指向被隐藏应用时自动回退到第一个可见应用
+- [x] 溢出:右侧动作按钮组本就 `shrink-0` + `useAutoCompact` 图标坍缩保留;配合未安装应用自动隐藏,非全屏窗口右侧不再被挤出
+- [x] 测试:tests/msw/handlers.ts 补 `get_tool_versions`(空数组=不隐藏)与 `is_claude_desktop_installed` mock
+
+2. 检测文案 i18n(验收 11):
+
+- [x] 后端哨兵串 `not installed or not executable`(misc.rs)保持英文原样;AboutSection 展示层 `localizeToolError` 把哨兵映射为 `t("settings.toolNotInstalled")`(zh:未安装或不可执行 / zh-TW:未安裝或不可執行 / ja:未インストールまたは実行不可 / en 保原文),`[WSL:distro]` 前缀等诊断信息保留
+
+3. 官网链接(验收 12):
+
+- [x] AboutSection 新增 `TOOL_WEBSITES` 映射,工具名右侧渲染 ExternalLink 图标按钮(系统浏览器打开):Claude Code→claude.com/claude-code、Codex→developers.openai.com/codex、Gemini CLI→github.com/google-gemini/gemini-cli、OpenCode→opencode.ai、OpenClaw→openclaw.ai、Hermes→hermes-agent.nousresearch.com
+
+4. 手动安装命令(验收 13):
+
+- [x] `WINDOWS_ONE_CLICK_INSTALL_COMMANDS` 按任务原文替换(Claude irm 安装、Codex 微软商店/PowerShell 两法、Gemini pnpm、OpenCode/OpenClaw curl、Hermes iex);删除不再使用的 Hermes EncodedCommand 辅助常量;POSIX 侧不变
+
+验证:
+
+- [x] `cargo check` / `cargo fmt --check` 通过;`pnpm typecheck` / `format:check` 通过
+- [x] `tests/integration/App.test.tsx` 单文件 4/4 通过
+- [x] 全量 `pnpm test:unit`:443/446,其余 3 个失败为 **上游既有的本机并行 flaky**(已用纯净 c8b0d60c 基线工作树复现同样 3 个失败;单跑该文件全通过),非本次改动引入
+
+

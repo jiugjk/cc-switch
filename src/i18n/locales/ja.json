@@ -813,6 +813,7 @@
     "toolActionPartial": "{{succeeded}} 個成功、{{failed}} 個失敗（{{action}}）",
     "toolActionFailed": "インストール/更新コマンドの実行に失敗しました",
     "toolNotRunnable": "インストール済みですが実行できません（バージョン未検出）",
+    "toolNotInstalled": "未インストールまたは実行不可",
     "toolActionVersionUnchangedTitle": "バージョンは変わりませんでした",
     "toolActionVersionUnchanged": "現在も {{version}}（最新: {{latest}}）です。アップデーターが成功を報告しても実際には更新されていない可能性があります。",
     "toolActionInstalledNotRunnable": "インストールされましたが、現在の環境では実行できません。確認してください",

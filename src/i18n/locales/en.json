@@ -813,6 +813,7 @@
     "toolActionPartial": "{{action}} succeeded for {{succeeded}}, failed for {{failed}}",
     "toolActionFailed": "Install/update command failed",
     "toolNotRunnable": "Installed but not runnable (no version detected)",
+    "toolNotInstalled": "not installed or not executable",
     "toolActionVersionUnchangedTitle": "Version did not change",
     "toolActionVersionUnchanged": "Still on {{version}} (latest: {{latest}}). The updater may have reported success without applying the update.",
     "toolActionInstalledNotRunnable": "Installed, but it can't run in the current environment — please check",

@@ -108,22 +108,6 @@ const ENV_BADGE_CONFIG: Record<
 const posixScriptInstallCommand = (url: string) =>
   `bash -c 'tmp=$(mktemp) && curl -fsSL ${url} -o $tmp && bash $tmp; status=$?; rm -f $tmp; exit $status'`;
 
-const HERMES_WINDOWS_INSTALL_SCRIPT =
-  "irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex";
-
-const powershellEncodedCommand = (script: string): string => {
-  let binary = "";
-  for (let i = 0; i < script.length; i += 1) {
-    const code = script.charCodeAt(i);
-    binary += String.fromCharCode(code & 0xff, code >> 8);
-  }
-  return btoa(binary);
-};
-
-const HERMES_WINDOWS_INSTALL_COMMAND = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${powershellEncodedCommand(
-  HERMES_WINDOWS_INSTALL_SCRIPT,
-)}`;
-
 const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 ${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest
 # Codex
@@ -138,17 +122,23 @@ npm i -g openclaw@latest
 ${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh")}`;
 
 const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
-npm i -g @anthropic-ai/claude-code@latest
-# Codex
-npm i -g @openai/codex@latest
+irm https://claude.ai/install.ps1 | iex
+
+# OpenAI Codex
+1.微软商店
+2.powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+
 # Gemini CLI
-npm i -g @google/gemini-cli@latest
+pnpm install -g @google/gemini-cli@latest
+
 # OpenCode
-npm i -g opencode-ai@latest
+curl -fsSL https://opencode.ai/install | bash
+
 # OpenClaw
-npm i -g openclaw@latest
-# Hermes
-${HERMES_WINDOWS_INSTALL_COMMAND}`;
+curl -fsSL https://openclaw.ai/install.sh | bash
+
+# Hermes (Nous Research)
+iex (irm https://hermes-agent.nousresearch.com/install.ps1)`;
 
 const ONE_CLICK_INSTALL_COMMANDS = isWindows()
   ? WINDOWS_ONE_CLICK_INSTALL_COMMANDS
@@ -162,6 +152,24 @@ const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
   openclaw: "OpenClaw",
   hermes: "Hermes",
 };
+
+// 各工具官网，展示在环境检测卡片的工具名右侧（外链图标，经系统浏览器打开）。
+const TOOL_WEBSITES: Record<ToolName, string> = {
+  claude: "https://claude.com/claude-code",
+  codex: "https://developers.openai.com/codex",
+  gemini: "https://github.com/google-gemini/gemini-cli",
+  opencode: "https://opencode.ai",
+  openclaw: "https://openclaw.ai",
+  hermes: "https://hermes-agent.nousresearch.com",
+};
+
+// 后端 NOT_INSTALLED 哨兵串保持英文原文（日志/外部脚本可能依赖），仅在展示层
+// 映射为本地化文案；`[WSL:distro] ` 等前缀与其余诊断信息原样保留。
+const NOT_INSTALLED_SENTINEL = "not installed or not executable";
+
+function localizeToolError(error: string, t: (key: string) => string): string {
+  return error.replace(NOT_INSTALLED_SENTINEL, t("settings.toolNotInstalled"));
+}
 
 // 后端返回的 tool 是 string；这里收敛唯一的 ToolName 断言与兜底，供升级确认
 // 对话框按工具名展示（避免在 JSX 里内联 cast、且每次渲染都新建闭包）。
@@ -1028,7 +1036,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                     ? "update"
                     : null;
             const runningAction = toolActions[toolName];
-            const title = tool?.version || tool?.error || t("common.unknown");
+            const title =
+              tool?.version ||
+              (tool?.error
+                ? localizeToolError(tool.error, t)
+                : t("common.unknown"));
             const conflicts = toolDiagnostics[toolName];
 
             return (
@@ -1045,8 +1057,23 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                       {appConfig?.icon ?? <Terminal className="h-4 w-4" />}
                     </span>
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">
-                        {displayName}
+                      <div className="flex min-w-0 items-center gap-1">
+                        <div className="truncate text-sm font-medium">
+                          {displayName}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void settingsApi.openExternal(
+                              TOOL_WEBSITES[toolName],
+                            )
+                          }
+                          className="shrink-0 text-muted-foreground transition-colors hover:text-primary"
+                          title={TOOL_WEBSITES[toolName]}
+                          aria-label={`${displayName} website`}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                        </button>
                       </div>
                       {tool?.env_type && ENV_BADGE_CONFIG[tool.env_type] && (
                         <span
@@ -1103,7 +1130,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                   </div>
                   {!isToolVersionLoading && !tool?.version && tool?.error && (
                     <div className="truncate text-[11px] text-muted-foreground">
-                      {tool.error}
+                      {localizeToolError(tool.error, t)}
                     </div>
                   )}
                 </div>
