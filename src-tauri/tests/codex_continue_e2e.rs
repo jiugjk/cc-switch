@@ -40,6 +40,12 @@ const R1: &[u8] = include_bytes!("fixtures/codex_poc_r1.sse.txt");
 /// round via `CCSWITCH_CODEX_CONTINUE_MAX=1` to keep TEST 1 at exactly 2 upstream
 /// requests.
 const R2: &[u8] = include_bytes!("fixtures/codex_poc_r2.sse.txt");
+/// Tool-call round fixture: reasoning (`encrypted_content` present) followed by a
+/// completed `function_call`, with `reasoning_tokens == 516` — the truncation
+/// fingerprint matches a legitimately COMPLETE tool-call response. TEST 3 proves
+/// such a round is never continued (the call must reach the client, not be
+/// swallowed by a continuation).
+const R_TOOL: &[u8] = include_bytes!("fixtures/codex_tool_round.sse.txt");
 
 /// The default continuation marker (mirrors `codex_continue::DEFAULT_MARKER`,
 /// which is private).
@@ -55,6 +61,9 @@ struct MockUpstream {
     bodies: Mutex<Vec<Value>>,
     /// Number of requests served so far (selects which fixture to return).
     served: AtomicUsize,
+    /// SSE fixtures served per request index; the last one repeats for any
+    /// additional requests.
+    fixtures: Vec<&'static [u8]>,
 }
 
 async fn mock_responses_handler(
@@ -64,9 +73,8 @@ async fn mock_responses_handler(
     let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     state.bodies.lock().expect("mock bodies lock").push(parsed);
 
-    // First request -> round 1 (truncated); every later request -> round 2.
     let index = state.served.fetch_add(1, Ordering::SeqCst);
-    let fixture: &[u8] = if index == 0 { R1 } else { R2 };
+    let fixture: &[u8] = state.fixtures[index.min(state.fixtures.len() - 1)];
 
     Response::builder()
         .status(200)
@@ -79,10 +87,11 @@ async fn mock_responses_handler(
 }
 
 /// Bind an ephemeral in-test upstream and return `(port, shared_state)`.
-async fn start_mock_upstream() -> (u16, Arc<MockUpstream>) {
+async fn start_mock_upstream(fixtures: Vec<&'static [u8]>) -> (u16, Arc<MockUpstream>) {
     let state = Arc::new(MockUpstream {
         bodies: Mutex::new(Vec::new()),
         served: AtomicUsize::new(0),
+        fixtures,
     });
     // A fallback route accepts any method/path, so it does not matter how the
     // forwarder assembles the upstream URL (`/v1/responses`).
@@ -282,7 +291,7 @@ async fn codex_continue_folds_truncated_responses_into_single_stream() {
     let _home = support::ensure_test_home();
     set_codex_continue_env("1");
 
-    let (mock_port, mock) = start_mock_upstream().await;
+    let (mock_port, mock) = start_mock_upstream(vec![R1, R2]).await;
 
     let db = Arc::new(Database::memory().expect("in-memory database"));
     let native = native_codex_provider("native-codex", mock_port, 0);
@@ -484,7 +493,7 @@ async fn codex_continue_disabled_when_chain_contains_converting_provider() {
     // continuation here is the whole-chain gate.
     set_codex_continue_env("1");
 
-    let (mock_port, mock) = start_mock_upstream().await;
+    let (mock_port, mock) = start_mock_upstream(vec![R1, R2]).await;
 
     let db = Arc::new(Database::memory().expect("in-memory database"));
     let native = native_codex_provider("native-codex", mock_port, 0);
@@ -538,6 +547,130 @@ async fn codex_continue_disabled_when_chain_contains_converting_provider() {
         initial.get("include").is_none(),
         "continuation gated off -> the initial upstream body is NOT augmented with an include injection, got: {}",
         initial
+    );
+
+    let _ = state.proxy_service.stop().await;
+}
+
+// ============================================================================
+// TEST 3 — a round carrying a completed tool call is never continued
+// ============================================================================
+
+/// Regression test for the "model says it has no exec/shell tools this turn"
+/// class: a legitimately COMPLETE response ending in a `function_call` whose
+/// `reasoning_tokens` coincidentally matches the 518n-2 truncation fingerprint
+/// (~1/step of tool-call rounds) used to trigger a continuation that silently
+/// swallowed the tool call (never streamed downstream, absent from the folded
+/// terminal output, not replayed upstream). The fix gates continuation on the
+/// round having no buffered non-message output items.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "serialize process-global test HOME, settings cache, and CodexCont env overrides across async proxy calls"
+)]
+async fn codex_continue_never_swallows_a_tool_call_round() {
+    let _guard = support::test_mutex().lock().expect("acquire test mutex");
+    support::reset_test_fs();
+    let _home = support::ensure_test_home();
+    // Continuation budget is available; only the pending-tool-output gate may
+    // stop the fold from issuing a second upstream request.
+    set_codex_continue_env("8");
+
+    let (mock_port, mock) = start_mock_upstream(vec![R_TOOL]).await;
+
+    let db = Arc::new(Database::memory().expect("in-memory database"));
+    let native = native_codex_provider("native-codex", mock_port, 0);
+    db.save_provider("codex", &native)
+        .expect("save native provider");
+    db.set_current_provider("codex", "native-codex")
+        .expect("set current provider");
+
+    let state = AppState::new(db);
+    let proxy_port = start_proxy(&state).await;
+
+    let (status, content_type, body_bytes) =
+        post_responses(proxy_port, &codex_request_body()).await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "folded response is 200");
+    assert!(
+        content_type.contains("text/event-stream"),
+        "folded response is SSE, got content-type: {content_type}"
+    );
+
+    let body = String::from_utf8_lossy(&body_bytes);
+    let events = parse_sse_events(&body);
+
+    // The client stream must carry the full function_call event chain.
+    let call_added = events
+        .iter()
+        .any(|e| e["type"] == "response.output_item.added" && e["item"]["type"] == "function_call");
+    assert!(
+        call_added,
+        "function_call output_item.added reaches the client"
+    );
+    let args_deltas: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "response.function_call_arguments.delta")
+        .collect();
+    assert_eq!(
+        args_deltas.len(),
+        2,
+        "both buffered argument deltas are flushed in order"
+    );
+    assert_eq!(args_deltas[0]["delta"], json!("{\"command\":[\"ls\""));
+    assert_eq!(args_deltas[1]["delta"], json!(",\"-la\"]}"));
+    let call_done = events
+        .iter()
+        .find(|e| e["type"] == "response.output_item.done" && e["item"]["type"] == "function_call")
+        .expect("function_call output_item.done reaches the client");
+    assert_eq!(call_done["item"]["call_id"], "call_shell_1");
+    assert_eq!(call_done["item"]["name"], "shell");
+    assert_eq!(
+        call_done["item"]["arguments"],
+        json!("{\"command\":[\"ls\",\"-la\"]}"),
+        "tool call arguments survive the fold verbatim"
+    );
+
+    // Terminal output preserves [reasoning, function_call] with identity intact.
+    let completed: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "response.completed")
+        .collect();
+    assert_eq!(completed.len(), 1, "exactly one terminal event");
+    let response = &completed[0]["response"];
+    let output = response["output"].as_array().expect("output array");
+    assert_eq!(output.len(), 2, "reasoning + function_call in final output");
+    assert_eq!(output[0]["type"], "reasoning");
+    assert!(
+        non_empty_encrypted(&output[0]),
+        "reasoning keeps encrypted_content"
+    );
+    assert_eq!(output[1]["type"], "function_call");
+    assert_eq!(output[1]["call_id"], "call_shell_1");
+    assert_eq!(output[1]["name"], "shell");
+
+    // Diagnosability: the fold metadata records WHY it refused to continue.
+    let continue_md = &response["metadata"]["ccswitch_codex_continue"];
+    assert_eq!(
+        continue_md["stopped_reason"],
+        json!("pending_tool_output"),
+        "stopped_reason explains the pending tool call"
+    );
+    let rounds = response["metadata"]["proxy_rounds"]
+        .as_array()
+        .expect("proxy_rounds array");
+    assert_eq!(rounds.len(), 1, "single round recorded");
+    assert_eq!(rounds[0]["truncated"], json!(true));
+    assert_eq!(rounds[0]["pending_tool_output"], json!(true));
+    assert_eq!(rounds[0]["continued"], json!(false));
+
+    // Exactly ONE upstream request: the fingerprint match must NOT spawn a
+    // continuation when the round carries a tool call.
+    let bodies = mock.bodies.lock().expect("mock bodies lock");
+    assert_eq!(
+        bodies.len(),
+        1,
+        "tool-call round is never continued despite matching the truncation fingerprint"
     );
 
     let _ = state.proxy_service.stop().await;

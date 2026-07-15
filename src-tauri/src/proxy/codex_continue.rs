@@ -266,6 +266,22 @@ fn usage_from_terminal(event: &Value) -> Option<&Value> {
     event.get("response").and_then(|r| r.get("usage"))
 }
 
+/// 截断续写只对「纯推理中断」的轮次安全。若本轮已缓冲了 message 之外的
+/// 输出项（function_call / custom_tool_call / local_shell_call 等工具调用，
+/// 或未知类型），说明模型已产出等待客户端执行的动作：此时继续续写会把
+/// 这些缓冲项整个吞掉——既不下发、不进 final_output、也无法安全重放进
+/// 续写请求（未配对的 function_call 会被上游拒绝）。这正是"经代理后模型
+/// 称本回合没有 exec/文件工具"的根因之一：合法完成的工具调用轮，其
+/// reasoning_tokens 恰好命中 518n-2 指纹（对不截断的上游约 1/step 概率）
+/// 时被误判为截断，工具调用随续写丢失。类型缺失按阻断处理（宁可不续写，
+/// 不丢数据）。message（含 commentary）沿用既有语义：允许续写并被丢弃，
+/// 这是参考实现记录在案的取舍（见 codex_continue_e2e.rs）。
+/// Prior art: router-for-me/CLIProxyAPI（MIT）#4048/#4219 系列对
+/// "转换/续写路径丢失工具事件导致模型认为无工具"的同类根因修复。
+fn buffered_item_blocks_continuation(item: &Value) -> bool {
+    !matches!(item.get("type").and_then(Value::as_str), Some("message"))
+}
+
 fn sum_usage(acc: &mut Map<String, Value>, usage: Option<&Value>) {
     let Some(usage) = usage else {
         return;
@@ -819,15 +835,20 @@ fn fold_responses_stream(
                 .map(has_encrypted_content)
                 .unwrap_or(false);
             let truncated = is_truncation_pattern(rt, config.step);
+            let has_pending_tool_output = buffered_items
+                .iter()
+                .any(|entry| buffered_item_blocks_continuation(&entry.item));
             let can_continue = terminal.is_some()
                 && truncated
                 && has_encrypted
+                && !has_pending_tool_output
                 && continuations < config.max_continuations;
             rounds.push(json!({
                 "round": round_no,
                 "reasoning_tokens": rt,
                 "truncated": truncated,
                 "has_encrypted_content": has_encrypted,
+                "pending_tool_output": has_pending_tool_output,
                 "continued": can_continue,
             }));
 
@@ -940,6 +961,10 @@ fn fold_responses_stream(
 
             let stopped_reason = if truncated && !has_encrypted {
                 Some("no_encrypted_content")
+            } else if truncated && has_pending_tool_output {
+                // 命中截断指纹但本轮已有待执行的工具调用：按完成响应下发，
+                // 绝不吞掉工具调用去续写（见 buffered_item_blocks_continuation）。
+                Some("pending_tool_output")
             } else if truncated && continuations >= config.max_continuations {
                 Some("max_continue")
             } else if terminal.is_none() {
@@ -1014,6 +1039,31 @@ mod tests {
         assert!(!is_truncation_pattern(Some(515), 518));
         assert!(!is_truncation_pattern(Some(517), 518));
         assert!(!is_truncation_pattern(None, 518));
+    }
+
+    #[test]
+    fn only_message_items_allow_continuation() {
+        // message（含 commentary）沿用既有"允许续写并丢弃"的取舍
+        assert!(!buffered_item_blocks_continuation(&json!({
+            "type": "message", "role": "assistant", "phase": "commentary"
+        })));
+        // 一切工具调用类输出项都必须阻断续写
+        for kind in [
+            "function_call",
+            "custom_tool_call",
+            "local_shell_call",
+            "tool_search_call",
+            "web_search_call",
+            "mcp_call",
+        ] {
+            assert!(
+                buffered_item_blocks_continuation(&json!({ "type": kind })),
+                "{kind} must block continuation"
+            );
+        }
+        // 类型缺失/非字符串：宁可不续写，不丢数据
+        assert!(buffered_item_blocks_continuation(&json!({})));
+        assert!(buffered_item_blocks_continuation(&json!({ "type": 42 })));
     }
 
     #[test]
