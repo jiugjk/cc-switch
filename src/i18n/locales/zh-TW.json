@@ -1043,7 +1043,9 @@
     "apiHint": "填寫相容 Claude API 的伺服器端點位址，請勿以斜線結尾",
     "apiHintOAI": "填寫相容 OpenAI Chat Completions 的伺服器端點位址，請勿以斜線結尾",
     "apiHintGeminiNative": "建議填寫 Gemini Native 的 base URL，例如 https://generativelanguage.googleapis.com 或 https://generativelanguage.googleapis.com/v1beta；代理伺服器會自動補齊 models/*:generateContent",
-    "codexApiHint": "填寫相容 OpenAI Response 格式的伺服器端點位址",
+    "codexApiHint": "填寫相容 OpenAI Responses API 的伺服器端點位址，請勿以斜線結尾；直連使用，不轉換格式",
+    "codexApiHintChat": "填寫相容 OpenAI Chat Completions 的伺服器端點位址，請勿以斜線結尾；需開啟路由接管，由本地路由轉換為 Responses",
+    "codexApiHintAnthropic": "填寫相容 Anthropic Messages 的伺服器端點位址，請勿以斜線結尾；需開啟路由接管，由本地路由轉換為 Responses",
     "fillSupplierName": "請填寫供應商名稱",
     "fillConfigContent": "請填寫設定內容",
     "fillParameter": "請填寫 {{label}}",
@@ -1085,9 +1087,6 @@
     "apiFormatOpenAIChat": "OpenAI Chat Completions (需開啟路由)",
     "apiFormatOpenAIResponses": "OpenAI Responses API (需開啟路由)",
     "apiFormatGeminiNative": "Gemini Native generateContent (需開啟路由)",
-    "codexApiFormatResponses": "OpenAI Responses API (原生)",
-    "codexApiFormatOpenAIChat": "OpenAI Chat Completions (需開啟路由)",
-    "codexApiFormatHint": "選擇供應商真實支援的 Codex API 格式；設定仍保持 Responses 以相容新版 Codex，Chat Completions 會透過本地路由自動轉換。",
     "authField": "驗證欄位",
     "authFieldAuthToken": "ANTHROPIC_AUTH_TOKEN（預設）",
     "authFieldApiKey": "ANTHROPIC_API_KEY",
@@ -1307,7 +1306,7 @@
     "reasoningEffortHint": "上游支援 low/high/max 等思考深度控制時啟用。啟用後會自動啟用思考模式，並把 Codex 的 reasoning.effort 轉成上游 Chat 參數。",
     "reasoningGroupTitle": "思考能力",
     "reasoningSectionHint": "預設供應商已自動設定；自訂供應商會按名稱/位址自動推斷。僅當自動識別不準時才需手動覆寫。",
-    "advancedSectionHint": "包含上游格式、模型映射、思考能力與自訂 User-Agent。使用 Chat Completions 協定的供應商需開啟路由接管才能使用。"
+    "advancedSectionHint": "包含上游格式、模型映射、思考能力與自訂 User-Agent。使用 Chat Completions 或 Anthropic Messages 協定的供應商需開啟路由接管才能使用。"
   },
   "geminiConfig": {
     "envFile": "環境變數 (.env)",

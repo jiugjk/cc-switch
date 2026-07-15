@@ -1071,7 +1071,9 @@
     "apiHint": "💡 Claude API 互換サービスのエンドポイントを入力してください。末尾にスラッシュを付けないでください",
     "apiHintOAI": "💡 OpenAI Chat Completions 互換サービスのエンドポイントを入力してください。末尾にスラッシュを付けないでください",
     "apiHintGeminiNative": "💡 Gemini Native では https://generativelanguage.googleapis.com または https://generativelanguage.googleapis.com/v1beta のような base URL を推奨します。プロキシが models/*:generateContent を自動補完します",
-    "codexApiHint": "💡 OpenAI Response 互換のサービスエンドポイントを入力してください",
+    "codexApiHint": "💡 OpenAI Responses API 互換サービスのエンドポイントを入力してください。末尾にスラッシュを付けないでください。直接接続で、フォーマット変換は行われません",
+    "codexApiHintChat": "💡 OpenAI Chat Completions 互換サービスのエンドポイントを入力してください。末尾にスラッシュを付けないでください。ルーティング引き継ぎが必要で、ローカルルーティングが Responses に変換します",
+    "codexApiHintAnthropic": "💡 Anthropic Messages 互換サービスのエンドポイントを入力してください。末尾にスラッシュを付けないでください。ルーティング引き継ぎが必要で、ローカルルーティングが Responses に変換します",
     "fillSupplierName": "プロバイダー名を入力してください",
     "fillConfigContent": "設定内容を入力してください",
     "fillParameter": "{{label}} を入力してください",
@@ -1113,9 +1115,6 @@
     "apiFormatOpenAIChat": "OpenAI Chat Completions（ルーティングが必要）",
     "apiFormatOpenAIResponses": "OpenAI Responses API（ルーティングが必要）",
     "apiFormatGeminiNative": "Gemini Native generateContent（ルーティングが必要）",
-    "codexApiFormatResponses": "OpenAI Responses API（ネイティブ）",
-    "codexApiFormatOpenAIChat": "OpenAI Chat Completions（ルーティングが必要）",
-    "codexApiFormatHint": "このプロバイダーが実際に対応している Codex API フォーマットを選択します。新しい Codex との互換性のため設定は Responses のままにし、Chat Completions はローカルルーティングで変換します。",
     "authField": "認証フィールド",
     "authFieldAuthToken": "ANTHROPIC_AUTH_TOKEN（デフォルト）",
     "authFieldApiKey": "ANTHROPIC_API_KEY",
@@ -1335,7 +1334,7 @@
     "reasoningEffortHint": "上流が low/high/max などの思考の深さの制御に対応している場合に有効化します。有効にすると思考モードも自動的にオンになり、Codex の reasoning.effort を上流の Chat パラメータに変換します。",
     "reasoningGroupTitle": "思考能力",
     "reasoningSectionHint": "プリセットの供給元は自動的に設定され、カスタム供給元は名前/URL から自動推論されます。自動識別が正しくない場合のみ手動で上書きしてください。",
-    "advancedSectionHint": "上流フォーマット、モデルマッピング、思考能力、カスタム User-Agent の設定を含みます。Chat Completions プロトコルを使用するプロバイダーはルーティング引き継ぎの有効化が必要です。"
+    "advancedSectionHint": "上流フォーマット、モデルマッピング、思考能力、カスタム User-Agent の設定を含みます。Chat Completions または Anthropic Messages プロトコルを使用するプロバイダーはルーティング引き継ぎの有効化が必要です。"
   },
   "geminiConfig": {
     "envFile": "環境変数 (.env)",

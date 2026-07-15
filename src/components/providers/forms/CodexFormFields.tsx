@@ -451,7 +451,9 @@ export function CodexFormFields({
         }}
       />
 
-      {/* Codex Base URL 输入框 */}
+      {/* Codex Base URL 输入框。提示随「上游格式」联动：Responses 直连不转换；
+          Chat / Anthropic 端点需开启路由接管由本地路由转换为 Responses（与
+          ClaudeFormFields 的按格式提示同一模式）。 */}
       {shouldShowSpeedTest && (
         <EndpointField
           id="codexBaseUrl"
@@ -459,7 +461,13 @@ export function CodexFormFields({
           value={codexBaseUrl}
           onChange={onBaseUrlChange}
           placeholder={t("providerForm.codexApiEndpointPlaceholder")}
-          hint={t("providerForm.codexApiHint")}
+          hint={
+            apiFormat === "openai_chat"
+              ? t("providerForm.codexApiHintChat")
+              : apiFormat === "anthropic"
+                ? t("providerForm.codexApiHintAnthropic")
+                : t("providerForm.codexApiHint")
+          }
           showFullUrlToggle
           isFullUrl={isFullUrl}
           onFullUrlChange={onFullUrlChange}
@@ -562,7 +570,7 @@ export function CodexFormFields({
             <p className="mt-1 ml-1 text-xs text-muted-foreground">
               {t("codexConfig.advancedSectionHint", {
                 defaultValue:
-                  "包含上游格式、模型映射、思考能力与自定义 User-Agent。使用 Chat Completions 协议的供应商需开启路由接管才能使用。",
+                  "包含上游格式、模型映射、思考能力与自定义 User-Agent。使用 Chat Completions 或 Anthropic Messages 协议的供应商需开启路由接管才能使用。",
               })}
             </p>
           )}

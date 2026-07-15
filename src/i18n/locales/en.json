@@ -1071,7 +1071,9 @@
     "apiHint": "💡 Fill in Claude API compatible service endpoint, avoid trailing slash",
     "apiHintOAI": "💡 Fill in OpenAI Chat Completions compatible service endpoint, avoid trailing slash",
     "apiHintGeminiNative": "💡 Prefer a Gemini Native base URL such as https://generativelanguage.googleapis.com or https://generativelanguage.googleapis.com/v1beta; the proxy will append models/*:generateContent automatically",
-    "codexApiHint": "💡 Fill in service endpoint compatible with OpenAI Response format",
+    "codexApiHint": "💡 Fill in an OpenAI Responses API compatible service endpoint, avoid trailing slash; used directly without format conversion",
+    "codexApiHintChat": "💡 Fill in an OpenAI Chat Completions compatible service endpoint, avoid trailing slash; requires routing takeover — the local router converts it to Responses",
+    "codexApiHintAnthropic": "💡 Fill in an Anthropic Messages compatible service endpoint, avoid trailing slash; requires routing takeover — the local router converts it to Responses",
     "fillSupplierName": "Please fill in provider name",
     "fillConfigContent": "Please fill in configuration content",
     "fillParameter": "Please fill in {{label}}",
@@ -1113,9 +1115,6 @@
     "apiFormatOpenAIChat": "OpenAI Chat Completions (Requires routing)",
     "apiFormatOpenAIResponses": "OpenAI Responses API (Requires routing)",
     "apiFormatGeminiNative": "Gemini Native generateContent (Requires routing)",
-    "codexApiFormatResponses": "OpenAI Responses API (Native)",
-    "codexApiFormatOpenAIChat": "OpenAI Chat Completions (Requires routing)",
-    "codexApiFormatHint": "Select the Codex API format actually supported by this provider; the config stays on Responses for newer Codex versions, while Chat Completions is converted through local routing.",
     "authField": "Auth Field",
     "authFieldAuthToken": "ANTHROPIC_AUTH_TOKEN (Default)",
     "authFieldApiKey": "ANTHROPIC_API_KEY",
@@ -1335,7 +1334,7 @@
     "reasoningEffortHint": "Enable when the upstream supports thinking-depth control such as low/high/max. Enabling this also turns on thinking mode and converts Codex's reasoning.effort into the upstream Chat parameter.",
     "reasoningGroupTitle": "Reasoning Capability",
     "reasoningSectionHint": "Preset providers are configured automatically; custom providers are inferred from name/URL. Override manually only when auto-detection is wrong.",
-    "advancedSectionHint": "Includes upstream format, model mapping, reasoning overrides and custom User-Agent. Providers using the Chat Completions protocol require routing takeover to be enabled."
+    "advancedSectionHint": "Includes upstream format, model mapping, reasoning overrides and custom User-Agent. Providers using the Chat Completions or Anthropic Messages protocol require routing takeover to be enabled."
   },
   "geminiConfig": {
     "envFile": "Environment Variables (.env)",
