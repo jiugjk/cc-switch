@@ -100,6 +100,26 @@ describe("probeInstalledApps", () => {
     invokeMock.mockReset();
   });
 
+  const mockCodexProbe = (options: {
+    cliVersion: string | null;
+    desktop: boolean | Error;
+  }) => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_tool_versions") {
+        return Promise.resolve([toolVersion("codex", options.cliVersion)]);
+      }
+      if (command === "is_claude_desktop_installed") {
+        return Promise.resolve(true);
+      }
+      if (command === "is_codex_desktop_installed") {
+        return options.desktop instanceof Error
+          ? Promise.reject(options.desktop)
+          : Promise.resolve(options.desktop);
+      }
+      return Promise.resolve(null);
+    });
+  };
+
   it("maps tool versions to installed flags with per-tool isolation", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_tool_versions") {
@@ -110,6 +130,9 @@ describe("probeInstalledApps", () => {
         ]);
       }
       if (command === "is_claude_desktop_installed") {
+        return Promise.resolve(false);
+      }
+      if (command === "is_codex_desktop_installed") {
         return Promise.resolve(false);
       }
       return Promise.resolve(null);
@@ -130,11 +153,54 @@ describe("probeInstalledApps", () => {
       if (command === "is_claude_desktop_installed") {
         return Promise.reject(new Error("probe failed"));
       }
+      if (command === "is_codex_desktop_installed") {
+        return Promise.resolve(false);
+      }
       return Promise.resolve(null);
     });
 
     const result = await probeInstalledApps();
     expect(result["claude-desktop"]).toBe(true);
+  });
+
+  it("shows codex when only the CLI is installed", async () => {
+    mockCodexProbe({ cliVersion: "0.44.0", desktop: false });
+    const result = await probeInstalledApps();
+    expect(result.codex).toBe(true);
+  });
+
+  it("shows codex when only the MS Store desktop app is installed", async () => {
+    mockCodexProbe({ cliVersion: null, desktop: true });
+    const result = await probeInstalledApps();
+    expect(result.codex).toBe(true);
+  });
+
+  it("shows codex when both Codex clients are installed", async () => {
+    mockCodexProbe({ cliVersion: "0.44.0", desktop: true });
+    const result = await probeInstalledApps();
+    expect(result.codex).toBe(true);
+  });
+
+  it("hides codex when neither Codex client is installed", async () => {
+    mockCodexProbe({ cliVersion: null, desktop: false });
+    const result = await probeInstalledApps();
+    expect(result.codex).toBe(false);
+  });
+
+  it("falls back to the CLI result when the desktop probe fails (AppX query error)", async () => {
+    mockCodexProbe({
+      cliVersion: "0.44.0",
+      desktop: new Error("appx query denied"),
+    });
+    const withCli = await probeInstalledApps();
+    expect(withCli.codex).toBe(true);
+
+    mockCodexProbe({
+      cliVersion: null,
+      desktop: new Error("appx query denied"),
+    });
+    const withoutCli = await probeInstalledApps();
+    expect(withoutCli.codex).toBe(false);
   });
 });
 
@@ -155,6 +221,9 @@ describe("useInstalledApps", () => {
       }
       if (command === "is_claude_desktop_installed") {
         return Promise.resolve(true);
+      }
+      if (command === "is_codex_desktop_installed") {
+        return Promise.resolve(false);
       }
       return Promise.resolve(null);
     });

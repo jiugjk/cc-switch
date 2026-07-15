@@ -46,6 +46,11 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/is_claude_desktop_installed`, () =>
     success(true),
   ),
+  // MS Store 版 Codex 桌面应用探测：false = 无补充信号，Codex 可见性由
+  // get_tool_versions 的空结果兜底（同上，按已安装处理）。
+  http.post(`${TAURI_ENDPOINT}/is_codex_desktop_installed`, () =>
+    success(false),
+  ),
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
     success(null),
   ),

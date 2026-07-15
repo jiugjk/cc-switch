@@ -173,6 +173,15 @@ pub fn is_claude_desktop_installed() -> bool {
     crate::claude_desktop_config::is_installed()
 }
 
+/// 检测 Microsoft Store 版 Codex 桌面应用是否安装（MSIX 包注册表/包目录
+/// 只读检查，见 codex_desktop 模块）。作为 CLI 探测之外的补充信号，供顶部
+/// 切换栏在 codex CLI 未装但桌面应用在装时仍显示 Codex 入口；非 Windows
+/// 恒为 false。注意：命中不代表 codex CLI 存在，CLI 版本探测仍走原逻辑。
+#[tauri::command]
+pub fn is_codex_desktop_installed() -> bool {
+    crate::codex_desktop::is_installed()
+}
+
 #[tauri::command]
 pub fn import_claude_desktop_providers_from_claude(
     state: State<'_, AppState>,

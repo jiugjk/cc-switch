@@ -262,6 +262,12 @@ export const settingsApi = {
     return await invoke("is_claude_desktop_installed");
   },
 
+  /** Microsoft Store 版 Codex 桌面应用是否安装（仅 Windows；MSIX 包身份只读
+   *  检测）。命中不代表 codex CLI 存在，只是切换栏显示 Codex 入口的补充信号。 */
+  async isCodexDesktopInstalled(): Promise<boolean> {
+    return await invoke("is_codex_desktop_installed");
+  },
+
   async runToolLifecycleAction(
     tools: string[],
     action: "install" | "update",

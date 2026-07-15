@@ -5,6 +5,7 @@ mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
+mod codex_desktop;
 mod codex_history_migration;
 mod codex_state_db;
 mod commands;
@@ -1199,6 +1200,7 @@ pub fn run() {
             commands::get_claude_desktop_status,
             commands::get_claude_desktop_default_routes,
             commands::is_claude_desktop_installed,
+            commands::is_codex_desktop_installed,
             commands::import_claude_desktop_providers_from_claude,
             commands::ensure_claude_desktop_official_provider,
             commands::ensure_codex_official_provider,

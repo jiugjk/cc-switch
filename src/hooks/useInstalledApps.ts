@@ -12,20 +12,28 @@ export const INSTALLED_APPS_QUERY_KEY = ["installed-apps"] as const;
 /** 探测结果视为新鲜的时长：窗口反复聚焦时在该窗口期内不重复探测（节流）。 */
 const INSTALLED_APPS_STALE_TIME_MS = 30_000;
 
-/** 探测各应用本地安装状态（仅本地 --version / 配置目录探测，无网络请求）。
+/** 探测各应用本地安装状态（仅本地 --version / 配置目录 / 包身份探测，无网络请求）。
  *  单个工具探测失败只影响该工具自身字段（version 为空 → false），
  *  整个调用失败由 React Query 保留上次数据，不清空其他应用的结果。 */
 export async function probeInstalledApps(): Promise<InstalledApps> {
-  const [tools, desktopInstalled] = await Promise.all([
+  const [tools, desktopInstalled, codexDesktopInstalled] = await Promise.all([
     settingsApi.getToolVersions(undefined, undefined, false),
     // Claude Desktop 无 CLI，可用性以配置目录存在与否近似；探测异常时视为已安装。
     settingsApi.isClaudeDesktopInstalled().catch(() => true),
+    // MS Store 版 Codex 桌面应用（仅 Windows）。它是 CLI 探测之外的补充 OR 信号：
+    // 探测异常按 false 处理即可——CLI 在装时按钮仍显示，不会因此误隐藏。
+    settingsApi.isCodexDesktopInstalled().catch(() => false),
   ]);
   const next: InstalledApps = {
     "claude-desktop": desktopInstalled,
   };
   for (const tool of tools) {
     next[tool.name as AppId] = Boolean(tool.version);
+  }
+  // 任一有效 Codex 客户端（CLI 或桌面应用）在装即显示 Codex 入口；
+  // 两者官方共享 ~/.codex，现有配置管理对桌面应用同样生效。
+  if (codexDesktopInstalled) {
+    next.codex = true;
   }
   return next;
 }
