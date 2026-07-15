@@ -63,6 +63,10 @@ struct ToolCallState {
     done: bool,
 }
 
+/// 旧版 `delta.function_call`（单调用、无 index）折算到状态机时使用的固定
+/// Chat index。旧协议与 `delta.tool_calls` 不会在同一个流中混用。
+const LEGACY_FUNCTION_CALL_CHAT_INDEX: usize = 0;
+
 #[derive(Debug)]
 struct ChatToResponsesState {
     response_started: bool,
@@ -162,6 +166,28 @@ impl ChatToResponsesState {
                         self.push_tool_call_delta(tool_call, reasoning_for_tool_call.as_deref()),
                     );
                 }
+            } else if let Some(function_call) = delta.get("function_call").filter(|v| v.is_object())
+            {
+                // 旧版单调用流式形态（deprecated `delta.function_call`，无 index/id）：
+                // 部分 OpenAI 兼容中转站仍以此形态下发工具调用；此前只认
+                // `delta.tool_calls`，整个调用被静默丢弃，Codex 端表现为"本回合
+                // 没有可用工具"。折算成固定 index 的 tool_calls 增量复用同一状态
+                // 机；旧协议永不携带 id，这里直接合成稳定 call_id（与 finalize 的
+                // `call_{index}` 兜底同名），使 name 一到即可流式 released，
+                // 不必等到流结束。Chat 上游无状态，call_id 只需请求内自洽。
+                // Prior art: router-for-me/CLIProxyAPI (MIT) #4219 / commit
+                // 07455ecb —— 上游省略调用 id 时 Responses 事件链从不发出。
+                events.extend(self.flush_inline_think_at_boundary());
+                let reasoning_for_tool_call = self.current_reasoning_text();
+                events.extend(self.finalize_reasoning());
+                let legacy_delta = json!({
+                    "index": LEGACY_FUNCTION_CALL_CHAT_INDEX,
+                    "id": format!("call_{LEGACY_FUNCTION_CALL_CHAT_INDEX}"),
+                    "function": function_call,
+                });
+                events.extend(
+                    self.push_tool_call_delta(&legacy_delta, reasoning_for_tool_call.as_deref()),
+                );
             }
         }
 
@@ -943,6 +969,48 @@ mod tests {
         assert!(output.contains("event: response.function_call_arguments.done"));
         assert!(output.contains("\"type\":\"function_call\""));
         assert!(output.contains("\"call_id\":\"call_1\""));
+    }
+
+    #[tokio::test]
+    async fn converts_legacy_function_call_chat_sse_to_responses_sse() {
+        // 旧版单调用形态：`delta.function_call`（无 index/id），部分中转站仍在使用。
+        // 此前该形态被静默忽略，Codex 收不到任何 function_call 事件。
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_legacy\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\"}}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_legacy\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"function_call\":{\"arguments\":\"[\\\"ls\\\"]}\"}}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_legacy\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{},\"finish_reason\":\"function_call\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        let events = parse_sse_events(&output);
+        let added = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "response.output_item.added"
+                    && event["item"]["type"] == "function_call"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(added.len(), 1, "legacy call emits exactly one output item");
+
+        let done = events
+            .iter()
+            .find(|event| event["type"] == "response.output_item.done")
+            .expect("legacy call reaches output_item.done");
+        assert_eq!(done["item"]["type"], "function_call");
+        assert_eq!(done["item"]["name"], "shell");
+        assert_eq!(done["item"]["call_id"], "call_0");
+        assert_eq!(done["item"]["arguments"], r#"{"command":["ls"]}"#);
+
+        let completed = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("stream completes");
+        assert_eq!(completed["response"]["status"], "completed");
+        assert_eq!(
+            completed["response"]["output"][0]["type"], "function_call",
+            "final output carries the reconstructed legacy call"
+        );
     }
 
     #[tokio::test]

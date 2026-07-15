@@ -226,7 +226,19 @@ impl CodexToolContext {
                 Some("custom") => self.add_custom_tool(tool),
                 Some("tool_search") => self.add_tool_search_tool(),
                 Some("namespace") => self.add_namespace_tool(tool),
-                _ => {}
+                other => {
+                    // OpenAI 托管型工具（local_shell / web_search* / file_search /
+                    // code_interpreter / mcp 等）没有 Chat Completions 等价物，
+                    // 只能丢弃。这里必须留下可诊断日志：若被丢弃的是唯一工具，
+                    // 下游还会连带移除 tool_choice/parallel_tool_calls，上游模型
+                    // 将完全无工具可用——正是"模型称本回合没有 exec/文件工具"
+                    // 的直接机理之一，静默丢弃会让该问题无从排查。
+                    log::warn!(
+                        "[Codex] Responses→Chat 转换丢弃不支持的工具类型 {:?}（name={:?}）：Chat 协议无等价物",
+                        other.unwrap_or("<missing>"),
+                        tool.get("name").and_then(|v| v.as_str()).unwrap_or("<unnamed>")
+                    );
+                }
             },
             _ => {}
         }
@@ -331,6 +343,17 @@ pub fn responses_to_chat_completions_with_reasoning(
         .get("tools")
         .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()));
     if !has_tools {
+        // 客户端带了 tools 但全部在转换中被丢弃（如仅有托管型工具）：上游模型
+        // 将收不到任何工具定义。warn 一次，避免"模型称无工具"无从排查。
+        let client_sent_tools = body
+            .get("tools")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty());
+        if client_sent_tools {
+            log::warn!(
+                "[Codex] Responses→Chat 转换后 tools 为空（客户端原始 tools 均无 Chat 等价物），已连带移除 tool_choice/parallel_tool_calls，上游将不可调用任何工具"
+            );
+        }
         if let Some(obj) = result.as_object_mut() {
             obj.remove("tool_choice");
             obj.remove("parallel_tool_calls");
@@ -3202,6 +3225,42 @@ mod tests {
             result.get("tools").is_none(),
             "tools should be absent when all filtered"
         );
+    }
+
+    #[test]
+    fn responses_request_to_chat_drops_hosted_tool_types_entirely() {
+        // 托管型工具（local_shell / web_search 等）无 Chat 等价物：锁定当前
+        // "丢弃 + 连带移除 tool_choice/parallel_tool_calls"的语义（现会打
+        // warn 日志），防止未来无声回归；function 工具与其共存时必须存活。
+        let hosted_only = json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "local_shell"}, {"type": "web_search"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "input": "hi"
+        });
+        let result = responses_to_chat_completions(hosted_only).unwrap();
+        assert!(
+            result.get("tools").is_none(),
+            "hosted-only tools all dropped"
+        );
+        assert!(result.get("tool_choice").is_none());
+        assert!(result.get("parallel_tool_calls").is_none());
+
+        let mixed = json!({
+            "model": "gpt-5.4",
+            "tools": [
+                {"type": "local_shell"},
+                {"type": "function", "name": "shell", "parameters": {"type": "object"}}
+            ],
+            "tool_choice": "auto",
+            "input": "hi"
+        });
+        let result = responses_to_chat_completions(mixed).unwrap();
+        let tools = result["tools"].as_array().expect("function tool survives");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "shell");
+        assert_eq!(result["tool_choice"], "auto");
     }
 
     #[test]
