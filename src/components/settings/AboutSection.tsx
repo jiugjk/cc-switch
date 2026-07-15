@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Download,
   Copy,
@@ -42,6 +43,7 @@ import { isWindows } from "@/lib/platform";
 import { isUpdateAvailable } from "@/lib/version";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
+import { INSTALLED_APPS_QUERY_KEY } from "@/hooks/useInstalledApps";
 
 interface AboutSectionProps {
   isPortable: boolean;
@@ -216,6 +218,7 @@ function mergeToolVersions(
 export function AboutSection({ isPortable }: AboutSectionProps) {
   // ... (use hooks as before) ...
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   // 惰性初始化自模块缓存：重挂时首帧即渲染上次的值，避免 loading 闪烁；首次挂载缓存
   // 为空则回退到原始初值（null / loading）。
   const [version, setVersion] = useState<string | null>(() => appVersionCache);
@@ -665,6 +668,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         setBatchAction(null);
       }
 
+      // 在 CC-Switch 内部安装/升级后窗口不会失焦，主动失效顶部切换栏的
+      // 「已安装」探测缓存，让新装工具的按钮立即出现（卸载场景同理）。
+      void queryClient.invalidateQueries({
+        queryKey: INSTALLED_APPS_QUERY_KEY,
+      });
+
       const actionLabel =
         action === "install"
           ? t("settings.toolInstall")
@@ -734,6 +743,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       toolVersionByName,
       refreshToolVersions,
       diagnoseToolSilently,
+      queryClient,
     ],
   );
 

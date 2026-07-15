@@ -38,6 +38,7 @@ import {
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { useProviderActions } from "@/hooks/useProviderActions";
+import { mergeShownApps, useInstalledApps } from "@/hooks/useInstalledApps";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
 import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
 import { hermesApi } from "@/lib/api/hermes";
@@ -211,46 +212,13 @@ function App() {
     hermes: true,
   };
 
-  // 顶部切换栏「已安装且可用」检测：启动时后台探测一次（仅本地 --version 探测，
-  // 不查 latest 版本、无网络请求）。结果返回前 installedApps 为 null → 按 visibleApps
-  // 原样显示，避免先显示后隐藏的闪烁反转；探测失败也保持 null——宁可多显示，不误隐藏。
-  const [installedApps, setInstalledApps] = useState<Partial<
-    Record<AppId, boolean>
-  > | null>(null);
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const [tools, desktopInstalled] = await Promise.all([
-          settingsApi.getToolVersions(undefined, undefined, false),
-          // Claude Desktop 无 CLI，可用性以配置目录存在与否近似；探测异常时视为已安装。
-          settingsApi.isClaudeDesktopInstalled().catch(() => true),
-        ]);
-        if (!active) return;
-        const next: Partial<Record<AppId, boolean>> = {
-          "claude-desktop": desktopInstalled,
-        };
-        for (const tool of tools) {
-          next[tool.name as AppId] = Boolean(tool.version);
-        }
-        setInstalledApps(next);
-      } catch (error) {
-        console.error("[App] Failed to detect installed tools", error);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, []);
+  // 顶部切换栏「已安装且可用」检测：启动时探测一次，窗口重新聚焦/从托盘恢复时
+  // 重新探测（详见 useInstalledApps），运行期间新装应用无需重启即可出现。
+  const installedApps = useInstalledApps();
 
   // 最终展示 = 用户可见性设置 ∧ 本地已安装。未知(探测未返回/字段缺失)按已安装处理。
   const shownApps: VisibleApps = useMemo(() => {
-    if (!installedApps) return visibleApps;
-    const merged = { ...visibleApps };
-    for (const app of Object.keys(merged) as AppId[]) {
-      merged[app] = merged[app] && installedApps[app] !== false;
-    }
-    return merged;
+    return mergeShownApps(visibleApps, installedApps);
     // visibleApps 每次渲染都是新对象（settingsData 兜底展开），依赖其字段序列化值即可。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(visibleApps), installedApps]);
