@@ -1,7 +1,8 @@
 name: Windows Build
 
 # Free automated Windows builds for the fork: no signing key or updater
-# secrets required. Runs on every push to main and on demand.
+# secrets required. Every successful main build creates a GitHub Release
+# v3.17.0-fork.<run_number> with NSIS / MSI / portable assets.
 on:
   workflow_dispatch:
   push:
@@ -10,6 +11,9 @@ on:
 concurrency:
   group: windows-build-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -60,6 +64,36 @@ jobs:
         shell: bash
         run: pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}' --bundles nsis,msi
 
+      - name: Collect release assets
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          shopt -s nullglob
+          for f in src-tauri/target/release/bundle/nsis/*.exe; do
+            cp "$f" "dist-release/$(basename "$f")"
+          done
+          for f in src-tauri/target/release/bundle/msi/*.msi; do
+            cp "$f" "dist-release/$(basename "$f")"
+          done
+          # Portable: the top-level release exe (not the nsis installer already copied)
+          for f in src-tauri/target/release/*.exe; do
+            base=$(basename "$f")
+            case "$base" in
+              *setup*|*installer*) continue ;;
+            esac
+            cp "$f" "dist-release/CC-Switch-portable-x64.exe"
+            break
+          done
+          ls -la dist-release
+          count=$(find dist-release -type f | wc -l)
+          if [ "$count" -lt 2 ]; then
+            echo "expected at least nsis+msi in dist-release, got $count" >&2
+            exit 1
+          fi
+          echo "tag=v3.17.0-fork.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
         with:
@@ -80,3 +114,46 @@ jobs:
           name: cc-switch-windows-x64-portable-${{ github.sha }}
           path: src-tauri/target/release/*.exe
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.assets.outputs.tag }}
+          name: ${{ steps.assets.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## CC Switch fork — Windows 构建
+
+            基于上游 [farion1231/cc-switch](https://github.com/farion1231/cc-switch) v3.17.0 的 fork 构建。
+
+            ### 本 fork 主要能力
+
+            - **CodexCont**：原生 `/v1/responses` 推理截断自动续写（不绕过 `forward_with_retry`，不吞工具轮）
+            - **路由可观测**：`ProxyStatus` last-route 字段 + 设置页摘要
+            - **额度归因**：`quota_error` + `last_fallback_reason`；可选 `decouple_official_quota`
+            - **能力解析**：声明/启发式 Provider 能力快照
+            - **应用探测**：焦点重探测、MS Store Codex 桌面包
+            - **Windows CI**：无签名 NSIS / MSI / 便携版
+
+            ### 安装包
+
+            | 文件 | 说明 |
+            |------|------|
+            | `*.exe`（NSIS） | 推荐安装器 |
+            | `*.msi` | MSI 安装包 |
+            | `CC-Switch-portable-x64.exe` | 便携版（若存在） |
+
+            ### 说明
+
+            - **未代码签名**：Windows 可能提示 SmartScreen，选「仍要运行」即可。
+            - **无自动更新通道**：本构建关闭了 `createUpdaterArtifacts`（无签名密钥）。
+            - 提交：`${{ github.sha }}` · 工作流 run：`${{ github.run_number }}`
+            - 上游赞助商列表见 [farion1231/cc-switch](https://github.com/farion1231/cc-switch#heartsponsor)
+
+            ### 致谢
+
+            感谢原作者 Jason Young 与上游贡献者。
+          files: dist-release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
