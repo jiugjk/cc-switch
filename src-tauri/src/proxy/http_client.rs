@@ -325,12 +325,18 @@ pub fn mask_url(url: &str) -> String {
             None => format!("{}://{}", parsed.scheme(), host),
         }
     } else {
-        // URL 解析失败，返回部分内容
-        if url.len() > 20 {
-            format!("{}...", &url[..20])
-        } else {
-            url.to_string()
+        // URL 解析失败，返回部分内容。按字符（而非字节）截断，避免多字节
+        // 字符（如中文代理地址）在字节索引 20 处落在字符中间时 panic
+        // （`byte index 20 is not a char boundary`）。
+        let mut truncated = String::new();
+        for ch in url.chars() {
+            if truncated.len() + ch.len_utf8() > 20 {
+                truncated.push_str("...");
+                return truncated;
+            }
+            truncated.push(ch);
         }
+        truncated
     }
 }
 
@@ -364,6 +370,21 @@ mod tests {
             mask_url("https://user:pass@proxy.example.com"),
             "https://proxy.example.com"
         );
+    }
+
+    #[test]
+    fn test_mask_url_does_not_panic_on_multibyte_unparseable() {
+        // 解析失败（无 scheme）+ 超过 20 字节 + 第 20 字节落在多字节字符中间。
+        // 每个中文字符 3 字节，字节索引 20 落在第 7 个字符（18..21）中间；
+        // 按字节切片会 panic，按字符截断则安全。
+        let cjk = "这是一个无效的代理地址字符串";
+        let masked = mask_url(cjk);
+        assert!(masked.ends_with("..."));
+        // 应在不超过 20 字节处截断（6 个字符 = 18 字节，加第 7 个会超过 20）
+        assert_eq!(masked, "这是一个无效...");
+
+        // 短的多字节串（不超过 20 字节）原样返回
+        assert_eq!(mask_url("无效地址"), "无效地址");
     }
 
     #[test]

@@ -151,9 +151,9 @@ impl ChatToResponsesState {
                 self.append_reasoning_to_active_tools(&reasoning);
             }
 
-            if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+            if let Some(content) = chat_delta_content_text(delta.get("content")) {
                 if !content.is_empty() {
-                    events.extend(self.push_content_delta(content));
+                    events.extend(self.push_content_delta(&content));
                 }
             }
 
@@ -383,6 +383,21 @@ impl ChatToResponsesState {
             let state = self.tools.entry(chat_index).or_default();
             if let Some(ref id) = id_delta {
                 if !id.is_empty() {
+                    // 诊断：同一 Chat index 在已 released（added）后又收到一个不同的
+                    // 非空 id，说明非规范上游把两个不同的工具调用复用了同一 index。
+                    // 当前状态机会把二者并到同一个 output item（第二个调用的
+                    // id/name/arguments 覆盖/追加到已发出的 item 上），造成串线。
+                    // 规范的 OpenAI 兼容流不会复用 index，故此处保守地仅打 warn 使其
+                    // 可诊断，不改变既有转换语义以免影响正常上游。
+                    if state.added && !state.call_id.is_empty() && state.call_id != *id {
+                        log::warn!(
+                            "[Codex/Chat] tool-call index {} 复用了不同的 call_id（{} → {}），\
+                             两个工具调用可能被串到同一 output item",
+                            chat_index,
+                            state.call_id,
+                            id
+                        );
+                    }
                     state.call_id.clone_from(id);
                 }
             }
@@ -717,6 +732,40 @@ fn chat_delta_reasoning_text(delta: &Value) -> Option<String> {
     extract_reasoning_field_text(delta)
 }
 
+/// 提取 Chat 流式增量的 `delta.content` 文本。
+///
+/// 标准 OpenAI 以字符串形态下发（`delta.content = "..."`），但部分兼容
+/// 中转站/网关以数组形态下发（`delta.content = [{"type":"text","text":"..."}]`）。
+/// 此前只用 `as_str()` 取值，数组形态会静默返回 None 导致助手文本整段丢失、
+/// 用户看到空/截断回答。这里同时兼容两种形态：字符串直接用；数组则拼接
+/// `type ∈ {text, output_text}` 的 `text` 字段（与非流式侧
+/// `responses_content_to_chat_content` 的取舍一致），非文本部分打 warn。
+fn chat_delta_content_text(content: Option<&Value>) -> Option<String> {
+    match content {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(parts)) => {
+            let mut text = String::new();
+            for part in parts {
+                let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match part_type {
+                    "text" | "output_text" => {
+                        if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                            text.push_str(t);
+                        }
+                    }
+                    other => {
+                        log::warn!(
+                            "[Codex] Chat→Responses 流式：忽略 delta.content 中的非文本部分 type={other:?}"
+                        );
+                    }
+                }
+            }
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
 enum ThinkPrefixDecision {
     NeedMore,
     Reasoning,
@@ -1011,6 +1060,31 @@ mod tests {
             completed["response"]["output"][0]["type"], "function_call",
             "final output carries the reconstructed legacy call"
         );
+    }
+
+    #[tokio::test]
+    async fn converts_array_form_content_delta_to_responses_text() {
+        // 部分兼容中转站以数组形态下发 delta.content
+        // （`[{"type":"text","text":"..."}]`）。此前只用 as_str() 取值，
+        // 数组形态整段丢失，用户看到空/截断回答。现在应拼接 text 部分。
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_arr\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"Hel\"}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_arr\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"lo\"}]},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        // 两段数组形态增量应被完整拼接为文本输出（此前整段丢失）。
+        assert!(output.contains("event: response.output_text.delta"));
+        assert!(output.contains("event: response.completed"));
+        let events = parse_sse_events(&output);
+        let message = events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.output_item.done" && event["item"]["type"] == "message"
+            })
+            .expect("array-form content produces a message item");
+        assert_eq!(message["item"]["content"][0]["text"], "Hello");
     }
 
     #[tokio::test]
