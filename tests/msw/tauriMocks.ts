@@ -63,3 +63,28 @@ vi.mock("@tauri-apps/api/path", () => ({
   homeDir: async () => "/home/mock",
   join: async (...segments: string[]) => segments.join("/"),
 }));
+
+// App / useInstalledApps call getCurrentWindow() for decorations, maximize
+// state, and focus. Without a stub, @tauri-apps/api throws on every mount
+// (metadata of undefined) and pollutes logs / slows integration tests.
+const createMockWindow = () => ({
+  label: "main",
+  isMaximized: async () => false,
+  setDecorations: async () => {},
+  minimize: async () => {},
+  maximize: async () => {},
+  unmaximize: async () => {},
+  close: async () => {},
+  startDragging: async () => {},
+  onFocusChanged: async () => () => {},
+  onResized: async () => () => {},
+  listen: async () => () => {},
+});
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => createMockWindow(),
+  getCurrent: () => createMockWindow(),
+  Window: {
+    getCurrent: () => createMockWindow(),
+  },
+}));

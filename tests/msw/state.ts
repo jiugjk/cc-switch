@@ -91,6 +91,9 @@ let liveProviderIds: LiveProviderIdsByApp = {
   openclaw: [],
   hermes: [],
 };
+// firstRunNoticeConfirmed: true keeps FirstRunNoticeDialog closed in tests.
+// Without it, Radix marks the main tree aria-hidden and App mount work balloons
+// past the default 5s testTimeout under parallel suite load.
 let settingsState: Settings = {
   showInTray: true,
   minimizeToTrayOnClose: true,
@@ -98,6 +101,16 @@ let settingsState: Settings = {
   claudeConfigDir: "/default/claude",
   codexConfigDir: "/default/codex",
   language: "zh",
+  firstRunNoticeConfirmed: true,
+  proxyConfirmed: true,
+  usageConfirmed: true,
+  failoverConfirmed: true,
+  autoSyncConfirmed: true,
+  commonConfigConfirmed: true,
+  // Default App header mounts ProfileSwitcher when this is omitted (?? true).
+  // Keep it off in the shared fixture so integration tests don't depend on
+  // profile APIs unless a case opts in.
+  showProfileSwitcher: false,
 };
 let appConfigDirOverride: string | null = null;
 const sessionMessageKey = (providerId: string, sourcePath: string) =>
@@ -216,6 +229,13 @@ export const resetProviderState = () => {
     claudeConfigDir: "/default/claude",
     codexConfigDir: "/default/codex",
     language: "zh",
+    firstRunNoticeConfirmed: true,
+    proxyConfirmed: true,
+    usageConfirmed: true,
+    failoverConfirmed: true,
+    autoSyncConfirmed: true,
+    commonConfigConfirmed: true,
+    showProfileSwitcher: false,
   };
   appConfigDirOverride = null;
   mcpConfigs = {

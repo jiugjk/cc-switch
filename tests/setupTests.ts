@@ -26,7 +26,20 @@ afterEach(() => {
   cleanup();
   resetProviderState();
   server.resetHandlers();
+  // Fake timers left on by a sibling file will freeze waitFor under parallel
+  // load; always restore real clocks between tests.
+  vi.useRealTimers();
   vi.clearAllMocks();
+  try {
+    localStorage.clear();
+  } catch {
+    // jsdom / polyfill edge cases
+  }
+  try {
+    sessionStorage.clear();
+  } catch {
+    // ignore
+  }
 });
 
 afterAll(() => {

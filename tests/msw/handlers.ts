@@ -345,12 +345,30 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_proxy_takeover_status`, () =>
     success({
       claude: false,
+      "claude-desktop": false,
       codex: false,
       gemini: false,
+      opencode: false,
+      openclaw: false,
+      hermes: false,
     }),
   ),
 
   http.post(`${TAURI_ENDPOINT}/is_live_takeover_active`, () => success(false)),
+
+  // Profiles / skills — App header and skills panels may invoke these on mount.
+  // Returning empty fixtures avoids MSW unhandled-request noise and stuck queries.
+  http.post(`${TAURI_ENDPOINT}/list_profiles`, () =>
+    success({
+      profiles: [],
+      currentIds: {
+        claude: null,
+        claudeDesktop: null,
+        codex: null,
+      },
+    }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/get_installed_skills`, () => success([])),
 
   // Failover / circuit breaker defaults
   http.post(`${TAURI_ENDPOINT}/get_failover_queue`, () => success([])),
