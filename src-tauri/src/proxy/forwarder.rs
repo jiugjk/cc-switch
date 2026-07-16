@@ -404,6 +404,20 @@ impl RequestForwarder {
             });
         }
 
+        // D2「使用自定义 API 时不依赖官方额度」：开启后，把内置官方 Codex 供应商
+        // 从候选链中剔除，使自定义 API 请求不会在失败时静默回退到官方额度。
+        // 判定逻辑抽为纯函数 `filter_official_when_decoupled` 以便单测。
+        let decouple =
+            matches!(app_type, AppType::Codex) && crate::settings::decouple_official_quota();
+        let before_len = providers.len();
+        let providers = filter_official_when_decoupled(providers, decouple);
+        if providers.len() != before_len {
+            log::info!(
+                "[{app_type_str}] [FWD-DECOUPLE] 已按「不依赖官方额度」剔除官方 Codex 供应商，剩余 {} 个候选",
+                providers.len()
+            );
+        }
+
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
@@ -504,11 +518,27 @@ impl RequestForwarder {
                         );
                     }
 
+                    // 解析本次实际生效的协议与脱敏上游（供 D1 状态展示）。
+                    // 只在成功后记录，避免展示「正在尝试」的未确认路由；
+                    // mask_url 只保留 scheme://host:port，绝不含 key/token/query。
+                    let capability_snapshot =
+                        super::providers::resolve_capabilities(app_type, provider);
+                    let route_protocol = capability_snapshot.protocol;
+                    let route_continuation = capability_snapshot.continuation;
+                    let masked_upstream = adapter
+                        .extract_base_url(provider)
+                        .ok()
+                        .map(|base_url| super::http_client::mask_url(&base_url));
+
                     // 更新成功统计
                     {
                         let mut status = self.status.write().await;
                         status.success_requests += 1;
                         status.last_error = None;
+                        status.last_route_protocol = Some(route_protocol.as_str().to_string());
+                        status.last_route_continuation =
+                            Some(route_continuation.as_str().to_string());
+                        status.last_masked_upstream = masked_upstream;
                         let should_switch =
                             self.current_provider_id_at_start.as_str() != provider.id.as_str();
                         if should_switch {
@@ -1018,10 +1048,31 @@ impl RequestForwarder {
                                 )
                                 .await;
 
+                            // 精确额度分类（优化既有故障转移）：把「真额度/额度耗尽」
+                            // 与普通限流/瞬时上游错误区分开。语义不变——额度错误本就
+                            // 走 Retryable→下一个 provider，循环上限仍由 max_attempts
+                            // 保证；这里只是给出可脱敏审计的归因，并记录到状态供 UI
+                            // 展示"本次切换因额度耗尽"。app-agnostic：Claude/Gemini 同样受益。
+                            let is_quota = super::quota_error::is_quota_exhaustion(&e);
                             {
                                 let mut status = self.status.write().await;
                                 status.last_error =
                                     Some(format!("Provider {} 失败: {}", provider.name, e));
+                                if is_quota {
+                                    // 仅记录脱敏事件标记（provider 名 + 归因），绝不含
+                                    // 响应体、Key、Token 或查询参数。
+                                    status.last_fallback_reason = Some(format!(
+                                        "quota_exhausted:{app_type_str}:{}",
+                                        provider.name
+                                    ));
+                                }
+                            }
+
+                            if is_quota {
+                                log::warn!(
+                                    "[{app_type_str}] [FWD-QUOTA] provider={} 额度/额度耗尽，按既有故障转移切换下一个供应商",
+                                    provider.name
+                                );
                             }
 
                             let (log_code, log_message) = build_retryable_failure_log(
@@ -2578,6 +2629,31 @@ impl RequestForwarder {
     }
 }
 
+/// D2 candidate-chain filter: when the "don't use official quota with a custom
+/// API" toggle is on, drop the built-in official Codex provider so a custom-API
+/// request never silently falls back onto official quota.
+///
+/// Safety invariant: the list is only filtered when at least one non-official
+/// provider remains — an all-official chain is returned untouched so a pure
+/// official user never loses their only channel. Credential isolation is
+/// unaffected (each provider resolves its own auth); this only decides who
+/// enters the attempt sequence.
+fn filter_official_when_decoupled(providers: Vec<Provider>, decouple: bool) -> Vec<Provider> {
+    if !decouple {
+        return providers;
+    }
+    let has_non_official = providers
+        .iter()
+        .any(|p| !super::providers::is_codex_official_provider(p));
+    if !has_non_official {
+        return providers;
+    }
+    providers
+        .into_iter()
+        .filter(|p| !super::providers::is_codex_official_provider(p))
+        .collect()
+}
+
 /// 从 ProxyError 中提取错误消息
 fn extract_error_message(error: &ProxyError) -> Option<String> {
     match error {
@@ -3454,6 +3530,7 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use crate::provider::LocalProxyRequestOverrides;
+    use crate::proxy::providers::is_codex_official_provider;
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
@@ -3506,6 +3583,72 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    fn official_codex_provider() -> Provider {
+        Provider {
+            id: crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            name: "Codex Official".to_string(),
+            settings_config: json!({}),
+            website_url: None,
+            category: Some("official".to_string()),
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    fn custom_codex_provider(id: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: format!("Custom {id}"),
+            settings_config: json!({ "base_url": "https://relay.example.com/v1" }),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    #[test]
+    fn decouple_disabled_returns_chain_unchanged() {
+        let chain = vec![official_codex_provider(), custom_codex_provider("c1")];
+        let out = filter_official_when_decoupled(chain, false);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(is_codex_official_provider));
+    }
+
+    #[test]
+    fn decouple_drops_official_when_custom_remains() {
+        let chain = vec![
+            official_codex_provider(),
+            custom_codex_provider("c1"),
+            custom_codex_provider("c2"),
+        ];
+        let out = filter_official_when_decoupled(chain, true);
+        assert_eq!(out.len(), 2, "official provider must be dropped");
+        assert!(
+            out.iter().all(|p| !is_codex_official_provider(p)),
+            "no official provider may remain"
+        );
+    }
+
+    #[test]
+    fn decouple_never_empties_official_only_chain() {
+        // A user with ONLY the official provider must not lose their only channel.
+        let chain = vec![official_codex_provider()];
+        let out = filter_official_when_decoupled(chain, true);
+        assert_eq!(out.len(), 1, "official-only chain must be preserved");
+        assert!(is_codex_official_provider(&out[0]));
     }
 
     #[test]

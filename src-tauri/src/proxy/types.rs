@@ -89,6 +89,31 @@ pub struct ProxyStatus {
     /// 当前活跃的代理目标列表
     #[serde(default)]
     pub active_targets: Vec<ActiveTarget>,
+    /// 最近一次**成功**转发实际使用的线路协议
+    /// （responses / chat_completions / anthropic / native）。
+    ///
+    /// 用于 UI 区分"逻辑上游 base_url"与"实际转发协议"，回答
+    /// "为什么 Base URL 没变代理仍生效"。仅在成功时更新（尝试中的
+    /// current_provider 可能误导）。
+    #[serde(default)]
+    pub last_route_protocol: Option<String>,
+    /// 最近一次成功转发的上游脱敏地址（仅 scheme://host[:port]，
+    /// 经 `mask_url` 处理，绝不含 API Key/Token/路径/查询参数）。
+    #[serde(default)]
+    pub last_masked_upstream: Option<String>,
+    /// 最近一次成功转发的 continuation 能力档位
+    /// （native / degraded / unsupported / unknown）。
+    #[serde(default)]
+    pub last_route_continuation: Option<String>,
+    /// 最近一次因**明确额度/额度耗尽**触发故障转移的脱敏标记。
+    ///
+    /// 仅在上游返回明确额度错误（quota_exceeded / insufficient_quota /
+    /// credits_exhausted / 402 等，见 `quota_error::is_quota_exhaustion`）并
+    /// 因此切换到下一个 provider 时设置；普通限流（rate_limit）、超时、认证
+    /// 失败、5xx 等都不会写入。用于 UI/日志区分"额度耗尽自动切换"与普通重试。
+    /// 不含任何凭据。
+    #[serde(default)]
+    pub last_fallback_reason: Option<String>,
 }
 
 /// 活跃的代理目标信息

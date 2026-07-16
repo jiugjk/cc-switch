@@ -27,6 +27,14 @@ export interface ProxyStatus {
   last_error: string | null;
   failover_count: number;
   active_targets?: ActiveTarget[];
+  /** 最近一次成功请求实际转发的协议（responses / chat_completions / anthropic / native）。 */
+  last_route_protocol?: string | null;
+  /** 最近一次成功请求的脱敏上游（仅 scheme://host:port，不含 key/token/query）。 */
+  last_masked_upstream?: string | null;
+  /** 最近一次成功请求的 continuation 能力档位（native / degraded / unsupported / unknown）。 */
+  last_route_continuation?: string | null;
+  /** 最近一次故障转移的脱敏归因（如 quota_exhausted:codex:<provider>）；不含凭据。 */
+  last_fallback_reason?: string | null;
 }
 
 export interface ActiveTarget {

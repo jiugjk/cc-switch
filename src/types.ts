@@ -357,6 +357,8 @@ export interface Settings {
   silentStartup?: boolean;
   // 是否启用主页面本地代理功能（默认关闭）
   enableLocalProxy?: boolean;
+  // 使用自定义 API 时不依赖 ChatGPT 官方额度（默认关闭，仅 Codex CLI 链路生效）
+  decoupleOfficialQuota?: boolean;
   // User has confirmed the local proxy first-run notice
   proxyConfirmed?: boolean;
   // User has confirmed the usage query first-run notice

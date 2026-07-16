@@ -600,17 +600,17 @@ export function CodexFormFields({
                     <SelectContent>
                       <SelectItem value="openai_chat">
                         {t("codexConfig.upstreamFormatChat", {
-                          defaultValue: "Chat Completions（需开启路由）",
+                          defaultValue: "Chat Completions",
                         })}
                       </SelectItem>
                       <SelectItem value="openai_responses">
                         {t("codexConfig.upstreamFormatResponses", {
-                          defaultValue: "Responses（原生）",
+                          defaultValue: "Responses",
                         })}
                       </SelectItem>
                       <SelectItem value="anthropic">
                         {t("codexConfig.upstreamFormatAnthropic", {
-                          defaultValue: "Anthropic Messages（需开启路由）",
+                          defaultValue: "Anthropic Messages",
                         })}
                       </SelectItem>
                     </SelectContent>
