@@ -40,8 +40,10 @@ export function CustomApiQuotaSettings({
 
       <ToggleRow
         icon={<ShieldCheck className="h-4 w-4 text-indigo-500" />}
-        title={t("settings.decoupleOfficialQuota")}
-        description={t("settings.decoupleOfficialQuotaDescription")}
+        title={t("settings.customApiQuota.decoupleOfficialQuota")}
+        description={t(
+          "settings.customApiQuota.decoupleOfficialQuotaDescription",
+        )}
         checked={settings.decoupleOfficialQuota ?? false}
         onCheckedChange={(value) => onChange({ decoupleOfficialQuota: value })}
       />
