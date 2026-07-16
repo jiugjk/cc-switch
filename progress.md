@@ -183,3 +183,98 @@
 
 - [x] 全量:pnpm typecheck/format:check/test:unit、cargo fmt --check/clippy -D warnings/cargo test(known-noise 跳过项见 G1)
 - [x] 提交拆分:上游合并(573c92da)/ G2 / G3 / G4 / G5 各自独立 commit(hash 见最终报告)
+
+## 阶段 H:文档审计 + 历史整理 + 遗留 bug 修复 ✅(2026-07-16)
+
+### H0 决策变更
+
+- **Phase F(Debian 无头版)已由用户决定放弃**,不再推进。相关架构勘察(阶段 F)保留作历史参考,但不再作为待办。见工作区 `docs/archive/phase-f-abandoned.md`。
+- 下一步任务定为 Newest Task(代理真实语义/Base URL 展示/登录额度解耦/quota 归因/capability 检测);可执行规格曾在根目录 `PROJECT-STATE-AND-NEXT-TASK.md`,**现已折入** `C:\CCSwitch\docs\`(state + 02/05 等)。D1–D4 见阶段 I。
+
+### H1 文档审计(5-agent 并行只读核验)
+
+- 逐条核验 progress.md 阶段 A–G 全部声明对得上真实代码/测试(附 file:line),无夸大。唯一小出入:G2 声称 17 个用例,实际 16 个 `it()`。
+- 发现并已修正的文档陈旧点:CLAUDE.md「Fork additions」原只列到 Phase A–E,已补齐 Phase G 四项(useInstalledApps 运行期重探测、Codex 文案联动、codex_desktop.rs MS Store 检测、CodexCont 工具丢失三修复);Phase F 由「planned but not started」改为「已放弃」;补记 README_DE 存在。
+- 8 份 `.recon-*.md`、两份已完成任务书当时加横幅存档;随后(同日用户决定激进整理)内容折入 `C:\CCSwitch\docs\` 后**删除**根任务大文档与 `.explore/` 参考克隆;remote 清单见 `docs/references.md`。
+
+### H2 审计发现的遗留 bug 修复(3 项,均带测试)
+
+- [x] **Bug 1(medium,http_client.rs:319 `mask_url`)**:解析失败分支 `&url[..20]` 按字节切片,多字节字符(如中文代理地址)落在字节索引 20 中间时 panic(`byte index 20 is not a char boundary`);因本 fork `panic=unwind` 红线,会中断命令。改为按字符累加截断。新测 `test_mask_url_does_not_panic_on_multibyte_unparseable`
+- [x] **Bug 2(medium,streaming_codex_chat.rs:154)**:Chat→Responses 流式只用 `delta.get("content").as_str()`,中转站以数组形态 `content:[{type:text,text:..}]` 下发时整段文本被静默丢弃→用户看到空/截断回答。新增 `chat_delta_content_text` 辅助:字符串直接用,数组拼接 `type∈{text,output_text}` 的 text(对齐非流式 `responses_content_to_chat_content` idiom),非文本部分打 warn。新测 `converts_array_form_content_delta_to_responses_text`
+- [x] **Bug 3(low,streaming_codex_chat.rs:383)**:tool-call 状态仅按 Chat `index` 键入 BTreeMap,非规范上游在已 released 的 index 上复用不同 call_id 时两个调用会并串到一个 output item。保守修:id 分歧时打 warn 使可诊断,不改既有语义(规范上游不复用 index)
+
+### H3 验证
+
+- [x] `cargo test --lib proxy::http_client`:3/3 通过;`cargo test --lib streaming_codex_chat`:21/21 通过
+- [x] `cargo fmt --check` / `cargo clippy -- -D warnings`:干净
+- [x] 文档改动零代码影响;历史文件横幅均为 UTF-8 正确写入
+
+## 阶段 I:代理真实语义可观测化 + capability 检测 + 故障转移额度归因 + 登录额度解耦（Newest Task D1–D4）✅（2026-07-16，代码已提交；D5/I6 现场仍开放）
+
+任务目标(逐字):不再以「Codex 配置页面中的 Base URL 是否变化」判断代理是否生效,而是完整确认并修正 Codex 运行时请求如何进入 CC Switch 代理、代理如何选择第三方上游、CodexCont 和路由功能在哪一层执行、关闭代理后哪些功能会失效;在此基础上完成登录额度解耦、quota 归因(不新开独立 fallback 开关)、协议能力适配、风险修复、真实验证和 Git 提交。实现向文档见 `C:\CCSwitch\docs\`(尤其 02/05/state)。
+
+### I0 侦察修正(先确认真实语义,再改)
+
+- 代理「接管」语义已核实:接管时改写 Codex live `config.toml` 的 `base_url` → `127.0.0.1:15721`、token 置 `PROXY_MANAGED` 占位、强制 `wire_api=responses`;原文件备份到 `proxy_live_backup`。**故 Codex 配置页 Base URL 不变 ≠ 代理未生效**——请求先落本地监听端口,再由转发层选上游。这正是 D1 要在 UI 说清的核心。
+- 唯一出口 = `forwarder.rs::forward_with_retry` / `forward_with_retry_inner`:路由/重试/故障转移全在此;任何改动不得钉死某 Provider 或绕过该链。
+- CodexCont 仅作用于 `/v1/responses` 原生直通链(任一故障转移候选需 Chat/Anthropic 转换即禁用)。三条 `/responses` 链:原生直通、Responses→Chat、Responses→Anthropic。
+- AppSettings 持久化 = JSON 文件 `~/.cc-switch/settings.json`(`OnceLock<RwLock<AppSettings>>`),非 SQLite DAO;UI-only 开关搭现有 get/save_settings blob,无需新命令/lib.rs 注册。
+
+### I1(D1)代理真实语义 + 可观测状态
+
+- [x] `proxy/types.rs`:`ProxyStatus` 增 `last_route_protocol` / `last_masked_upstream` / `last_route_continuation` / `last_fallback_reason`(均 `#[serde(default)]`,ProxyStatus 手维护 snake_case 镜像)
+- [x] `forwarder.rs` 成功点:调用 `resolve_capabilities` 解析线路协议/续写能力,`mask_url` 脱敏上游(仅留 scheme://host[:port],丢 path/query/userinfo),回写上述状态字段
+- [x] 前端 `src/types/proxy.ts` 同步 4 字段;新组件 `ProxyStatusSummary.tsx`(只读,消费 `useProxyStatus`):展示本地监听地址 / 逻辑 Provider / 已经本地路由 / 线路协议 / 续写能力 / 脱敏上游 / 故障转移原因,并附「接管语义」说明(解释为何 Base URL 不变但代理仍生效)
+- [x] `SettingsPage.tsx` General 页渲染;4 locale 加 `settings.proxyStatus.*`
+
+### I2(D4)协议能力检测表
+
+- [x] 新模块 `proxy/providers/capabilities.rs`:`CapabilityConfidence`(Heuristic<Declared<Probed<Confirmed)、`CapabilityState`(Supported/Unsupported/Unknown)、`ContinuationSupport`(Native/Degraded/Unsupported/Unknown)、`WireProtocol`(Responses/ChatCompletions/Anthropic/Native)、`ProviderCapabilitySnapshot`;`resolve_wire_protocol` / `resolve_capabilities`:声明能力(meta.capabilities)优先,否则由协议推导,否则 Unknown(fail-open);Chat/Anthropic → Degraded 续写(不等价原生 Responses)。仿 `model_capabilities.rs::resolve_image_input_capability` 模板
+- [x] `provider.rs`:新增 `ProviderCapabilities`(全 `Option<bool>`,serde camelCase);`ProviderMeta` 加 `capabilities: Option<ProviderCapabilities>`
+- [x] 5 个单测通过
+
+### I3(D2/D3)故障转移额度归因 + 登录额度解耦(按用户反馈:不新增机制,优化既有故障转移;尽量适配其他应用)
+
+- 复核:HTTP 429 已被 `categorize_proxy_error` 归为 Retryable → 额度耗尽本就走故障转移。故 D3 不新增开关,而是**精确归因**。
+- [x] 新模块 `proxy/quota_error.rs`:`is_quota_exhaustion(&ProxyError) -> bool`——仅 UpstreamError 可能是额度;正文标记法(quota_exceeded/insufficient_quota/usage_limit_reached/credits_exhausted…);402 且正文不矛盾 = 额度;纯 rate_limit_exceeded 明确非额度;排除超时/DNS/TLS/auth/5xx/model-not-found/params。6 单测通过
+- [x] `forwarder.rs` Retryable 分支:命中额度耗尽时写 `last_fallback_reason = quota_exhausted:<app>:<provider>` + FWD-QUOTA 日志;**语义不变**(仍经既有链故障转移)
+- [x] (D2)`settings.rs`:`AppSettings` 加 `#[serde(default)] decouple_official_quota: bool` + Default + 访问器 `decouple_official_quota()`;`forward_with_retry_inner` 开头按开关过滤候选链——开启时丢弃 Codex 官方 Provider(纯函数 `filter_official_when_decoupled`,**永不清空链**:仅有官方渠道的用户保留其渠道)+ FWD-DECOUPLE 日志。3 单测通过
+- [x] 前端:`types.ts` / `schemas/settings.ts` / `useSettingsForm.ts`(normalize + reset)加 `decoupleOfficialQuota`;新组件 `CustomApiQuotaSettings.tsx`(General 页 ToggleRow);4 locale 加 `settings.customApiQuota.*`
+
+### I4 验证
+
+- [x] 后端 `cargo test`:1990 通过;唯一 1 失败 = 本机运行中的 cc-switch.exe 占用 15721 端口(`update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active`,os error 10048),单独重跑通过 → 已知环境噪音,非回归(同 G1)
+- [x] 后端新增 14 单测全通过(capabilities 5 + quota 6 + decouple 3)
+- [x] 前端 `tsc --noEmit`:干净
+- [x] 前端 `pnpm test:unit`:461 通过;2 失败 = 满载并行下 `App.test.tsx` 5000ms 超时(非断言失败),单文件重跑 4/4 通过 → 环境噪音,非回归
+- [x] 4 locale 均为合法 JSON
+
+### I5(D5)真实环境验证 — 用户执行(待补)
+
+- [ ] 由用户跑最小真实请求(接管开/关、官方额度耗尽故障转移、自定义 API 解耦)并回填证据。清单:`C:\CCSwitch\docs\07-verify.md`
+
+### I6 ChatGPT 桌面应用路由研究(用户要求逆向本机 ChatGPT,尽量走 cc-switch)— 静态侦察完成,待现场确认
+
+**结论:分支 A(桌面应用遵从 `~/.codex/config.toml`,且 cc-switch 接管已经把其推理通道指向 `127.0.0.1:15721`)。路由本身无需新增任何工作。** 静态证据充分,尚未现场抓包确认。
+
+- **为何是 A 而非 B/C**:
+  - GUI 本身不做推理。Electron 壳(`app/ChatGPT.exe`,Chromium)拉起随包 Rust 引擎 `app\resources\codex.exe`(341MB,v0.144.4)以 `app-server` 模式运行;实测 spawn 参数为 `-c features.code_mode_host=true app-server --analytics-default-enabled`——唯一的 `-c` override 是 `code_mode_host`,Electron 层**没有任何 base_url override**(`app.asar` 中 `base_url` 出现次数 = 0)。
+  - 该引擎从 `config.toml` 读 `base_url`(引擎二进制字符串引用:`config.toml` / `base_url` / `wire_api` / `model_provider` / `model_providers.custom`)。
+  - 共享配置已确认:`~/.codex/config.toml` 含 `model_provider="custom"`、`[model_providers.custom] base_url="http://127.0.0.1:15721/v1"`、`wire_api="responses"`;同文件另有 `[desktop]` 与 `[tui]` 段 → GUI 与 CLI 共用同一文件,且 mtime 与 `auth.json` 一致(同一次接管改写)。
+  - 非 C:有完整配置面,无需 MSIX 二进制打补丁;TLS pinning 与分支 A 无关(我们不做拦截,是应用自身按配置指向本地代理)。
+  - 分支 B(系统/HTTPS_PROXY)可用但**不推荐**:引擎基于 reqwest 且识别 `HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY`,Chromium 识别系统代理——但正向代理会**连带捕获账号/登录/额度流量**(chatgpt.com/backend-api、auth.openai.com),既不该重定向也很可能破坏登录。config.toml 路由只干净地命中推理通道。
+- **关键作用域限制(cc-switch 能/不能触及)**:
+  - 模型 API 推理:**已经**经 cc-switch 路由 ✅
+  - UI 登录门 + 服务端鉴权:**不受影响也无法影响**——走 chatgpt.com / auth.openai.com 的独立 Electron 原生通道,config.toml 不管辖(该通道 base 仅能由环境变量 `CODEX_API_BASE_URL` 覆盖,默认 chatgpt.com/backend-api)。应用**仍需有效 ChatGPT 登录**才能打开;绕过 = 伪造鉴权,受安全约束明确排除。
+  - 官方额度:绑定账号通道,与代理无关;真正提供推理的是 cc-switch 的上游 Provider。
+- **置信度/未知项(诚实标注)**:强**静态**证据,非现场确认。侦察为只读,未启动应用、未抓包,故**尚未观测到真实 `/v1/responses` 请求命中 127.0.0.1:15721**。升级为现场确认需:打开应用发一条消息,同时看 cc-switch 代理日志。另 `experimental_bearer_token` / `requires_openai_auth` 的**取值**按脱敏约束未读——其设置影响引擎附带 OpenAI auth 还是代理 auth。
+- **关键证据路径**(WindowsApps 下 `OpenAI.Codex_26.707.9981.0_x64__2p2nqsd0c76g0`:`AppxManifest.xml`、`app\resources\codex.exe` 引擎、`app\resources\app.asar` Electron;`~/.codex/config.toml` 共享且已被 cc-switch 改写;`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe` 独立 CLI)
+- **建议**:路由视为已由分支 A 解决(与 codex CLI 相同机制,因共用 `~/.codex` 与同一引擎);不要加系统/正向代理(会过度捕获鉴权流量)。唯一开放项是经验性的:用户启动应用并在 cc-switch 日志确认请求落在 127.0.0.1:15721。并需对用户设定预期:应用的 ChatGPT 登录/额度 UI 不受 cc-switch 影响,可能显示与代理上游实际所服务的账号状态不一致。
+- [ ] **待用户现场确认**:启动 ChatGPT 桌面应用发一条消息,观察 cc-switch 日志中出现命中 `127.0.0.1:15721` 的 `/v1/responses` 请求(与 D5 一并回填)
+
+### I7 工作区文档激进整理(2026-07-16,与 H/I 提交同批)
+
+- [x] 新建 `C:\CCSwitch\docs\` Vibe 文档集(00–07 + state + references + archive/phase-f)
+- [x] 瘦身 `C:\CCSwitch\claude.md` 为短入口
+- [x] 删除 `.explore/`、`PROJECT-STATE-AND-NEXT-TASK.md`、`Newest Task.md`、`.plan-newest-task.md`(内容已折入 docs)
+- [x] Phase H2 + I 代码按逻辑拆 commit(本地,不 push)
