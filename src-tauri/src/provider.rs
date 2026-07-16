@@ -370,6 +370,62 @@ pub struct CodexChatReasoningConfig {
     pub output_format: Option<String>,
 }
 
+/// Declared protocol capabilities for a provider's real upstream.
+///
+/// Every field is `Option<bool>` so that absence means "unknown" (the resolver
+/// falls back to format-based inference and, failing that, fails open) rather
+/// than a silent `false`. This mirrors the `Option` discipline of
+/// [`CodexChatReasoningConfig`] and the fail-open contract of
+/// `model_capabilities.rs`. A declared value always outranks any heuristic in
+/// [`crate::proxy::providers::capabilities::resolve_capabilities`].
+///
+/// These describe what the UPSTREAM supports, and are consumed by the proxy
+/// status snapshot (observability) and by continuation-eligibility gating.
+/// Declaring a flag that no consumer reads is intentionally avoided; the
+/// currently-consumed fields are `supports_continuation` (continuation flavor)
+/// and, where declared, the protocol-support flags surfaced in status.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    #[serde(rename = "supportsResponses", skip_serializing_if = "Option::is_none")]
+    pub supports_responses: Option<bool>,
+    #[serde(
+        rename = "supportsChatCompletions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_chat_completions: Option<bool>,
+    #[serde(rename = "supportsStreaming", skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
+    #[serde(rename = "supportsTools", skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+    #[serde(rename = "supportsReasoning", skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning: Option<bool>,
+    #[serde(
+        rename = "supportsPreviousResponseId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_previous_response_id: Option<bool>,
+    #[serde(
+        rename = "supportsContinuation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_continuation: Option<bool>,
+    #[serde(
+        rename = "supportsResponseItemIds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_response_item_ids: Option<bool>,
+    #[serde(
+        rename = "supportsEncryptedReasoning",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_encrypted_reasoning: Option<bool>,
+    #[serde(
+        rename = "supportsUsageMetadata",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_usage_metadata: Option<bool>,
+}
+
 /// Local proxy request overrides applied after route/protocol transforms.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalProxyRequestOverrides {
@@ -467,6 +523,11 @@ pub struct ProviderMeta {
     /// Codex Responses -> Chat Completions reasoning capability metadata.
     #[serde(rename = "codexChatReasoning", skip_serializing_if = "Option::is_none")]
     pub codex_chat_reasoning: Option<CodexChatReasoningConfig>,
+    /// Declared protocol capabilities of this provider's real upstream.
+    /// Optional; when absent the proxy resolves capabilities from the routed
+    /// wire protocol and fails open. See [`ProviderCapabilities`].
+    #[serde(rename = "capabilities", skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ProviderCapabilities>,
     /// Codex → Anthropic path: whether to emulate the Claude Code client
     /// (User-Agent / anthropic-beta / x-app + injecting the Claude Code system
     /// prompt first line). Disabled by default; only an explicit `true` enables it.
