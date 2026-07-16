@@ -14,7 +14,7 @@
 
 ### 🌐 唯一官方网站：**[ccswitch.io](https://ccswitch.io)**
 
-[English](README.md) | 中文 | [日本語](README_JA.md) | [Deutsch](README_DE.md) | [更新日志](CHANGELOG.md)
+[English](README.md) | 中文 | [更新日志](CHANGELOG.md)
 
 </div>
 
@@ -22,12 +22,26 @@
 
 本仓库 fork 自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，在上游 v3.17.0 基础上新增以下功能：
 
-- **CodexCont 推理自动续写** — 在 `设置 → 路由 → CodexCont` 下新增开关，可在 `/v1/responses` 的原生 Responses 链上自动续写被截断的推理。仅在不会触发 Responses→Chat/Anthropic 转换时启用，并完全复用现有的供应商转发/路由/重试/故障转移链路——不绕过、不锁定供应商。
-- **顶部应用切换栏** — 自动隐藏未安装的工具，并修复非全屏宽度下右侧动作按钮被挤出屏幕的问题。
-- **检测文案本地化** — `not installed or not executable` 现在会按当前界面语言显示。
-- **工具官网链接** — 每个工具名称旁新增快捷按钮，可打开其官方网站。
-- **更新 Windows 安装命令** — 各工具的一键安装命令已更新为当前版本。
-- **免费 Windows 自动构建** — 新增 GitHub Actions 工作流（`workflow_dispatch` + push），在免费的 GitHub 托管 runner 上构建 NSIS / MSI / 便携版产物。
+### CodexCont 与代理
+
+- **CodexCont 推理自动续写** — `设置 → 路由 → CodexCont` 开关，在原生 `/v1/responses` 链上续写被截断的推理。仅在不会触发 Responses→Chat/Anthropic 转换时启用；完全复用 `RequestForwarder::forward_with_retry`（不绕过、不锁定供应商）。携带工具调用的轮次不会被吞掉；保留 legacy 流式 `function_call`。
+- **路由可观测** — `ProxyStatus` 暴露 last-route 字段；通用设置页展示 `ProxyStatusSummary`（当前供应商、最近成功/失败、故障转移原因）。
+- **额度归因** — 识别额度耗尽类错误并记录 `last_fallback_reason`；可选 `decouple_official_quota` 避免官方鉴权强行切到自定义 API 故障转移。**不新增**独立的「额度 fallback」开关，统一走既有 failover。
+- **供应商能力解析** — 声明/启发式能力快照（含 Chat = 降级续写），便于更安全的路由决策。
+
+### 应用探测与界面
+
+- **顶部应用切换栏** — 自动隐藏未安装工具；窗口重新获得焦点时重探测；修复非全屏宽度下右侧按钮被挤出屏幕。
+- **Codex 桌面** — Windows 上检测微软商店 `OpenAI.Codex` 包；端点提示随所选上游 API 格式联动。
+- **检测文案本地化** — `not installed or not executable` 按当前界面语言显示。
+- **工具官网链接** — 工具名旁快捷打开官网。
+- **更新 Windows 安装命令** — 各工具一键安装命令已刷新。
+
+### 构建
+
+- **免费 Windows 自动构建** — GitHub Actions（`workflow_dispatch` + push）在免费托管 runner 上构建 NSIS / MSI / 便携版。
+
+用户侧开放确认：代理开/关的真实请求矩阵；接管开启时确认 ChatGPT 桌面流量进入 `127.0.0.1:15721` `/v1/responses`。
 
 ## ❤️赞助商
 

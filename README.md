@@ -14,7 +14,7 @@
 
 ### 🌐 The Only Official Website: **[ccswitch.io](https://ccswitch.io)**
 
-English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_DE.md) | [Changelog](CHANGELOG.md)
+English | [中文](README_ZH.md) | [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -22,12 +22,26 @@ English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_
 
 This repository is a fork of [farion1231/cc-switch](https://github.com/farion1231/cc-switch) that adds the following on top of upstream v3.17.0:
 
-- **CodexCont reasoning auto-continuation** — A new toggle under `Settings → Routing → CodexCont` automatically continues truncated reasoning on `/v1/responses` native Responses chains. It engages only when it will not trigger a Responses→Chat/Anthropic conversion, and fully reuses the existing provider forwarding/routing/retry/failover path — no bypass, no pinned provider.
-- **Top app switcher** — Auto-hides uninstalled tools and fixes the right-side action buttons being pushed off-screen at non-fullscreen widths.
-- **Localized environment-check text** — `not installed or not executable` now displays in the active UI language.
-- **Tool website links** — Each tool name gets a shortcut button that opens its official website.
-- **Updated Windows install commands** — The per-tool one-click install commands were refreshed to their current forms.
-- **Free Windows auto-build** — A new GitHub Actions workflow (`workflow_dispatch` + push) builds the NSIS / MSI / portable artifacts on free GitHub-hosted runners.
+### CodexCont & proxy
+
+- **CodexCont reasoning auto-continuation** — Toggle under `Settings → Routing → CodexCont` continues truncated reasoning on native `/v1/responses` chains. Engages only when it will not trigger Responses→Chat/Anthropic conversion; fully reuses `RequestForwarder::forward_with_retry` (no bypass, no pinned provider). Does not swallow rounds that carry tool calls; keeps legacy streamed `function_call` events.
+- **Route observability** — `ProxyStatus` exposes last-route fields; General settings shows `ProxyStatusSummary` (active provider, last success/fail, fallback reason).
+- **Quota attribution** — Classifies quota-exhaustion errors and records `last_fallback_reason`; optional `decouple_official_quota` keeps official auth from forcing custom-API failover. No second independent “quota-fallback” switch — refinements go through the existing failover path.
+- **Provider capability resolver** — Declared/heuristic capability snapshot (including Chat = degraded continuation) for safer routing decisions.
+
+### Apps, detection & UI
+
+- **Top app switcher** — Auto-hides uninstalled tools; re-probes when the window regains focus; fixes action buttons being pushed off-screen at non-fullscreen widths.
+- **Codex desktop** — Detects the Microsoft Store `OpenAI.Codex` package on Windows; endpoint hints follow the selected upstream API format.
+- **Localized environment-check text** — `not installed or not executable` follows the active UI language.
+- **Tool website links** — Shortcut next to each tool name opens its official site.
+- **Updated Windows install commands** — Per-tool one-click install commands refreshed.
+
+### Build
+
+- **Free Windows auto-build** — GitHub Actions (`workflow_dispatch` + push) builds NSIS / MSI / portable artifacts on free hosted runners.
+
+Open user-side checks: real e2e matrix with proxy on/off; live confirm that ChatGPT desktop traffic hits `127.0.0.1:15721` `/v1/responses` when takeover is enabled.
 
 ## ❤️Sponsor
 
