@@ -110,6 +110,7 @@
 
 
 
+<<<<<<< HEAD
 - [x] æŽ¨é€ fork main(9 commit,å« rebase åŽçš„ä¸Šæ¸¸ 2 commit);`gh workflow run` å®žæµ‹ Windows Build:**æˆåŠŸ**(18m49s,NSIS/MSI/ä¾¿æºç‰ˆä¸‰äº§ç‰©ä¸Šä¼ ,run 29335745521)â€”â€”éªŒæ”¶ 14/15/16 å®Œæˆ
 
 ## é˜¶æ®µ G:ä¸Šæ¸¸åŒæ­¥ + åˆ‡æ¢æ è¿è¡ŒæœŸé‡æŽ¢æµ‹ + Codex æ–‡æ¡ˆ + MS Store Codex æ£€æµ‹ + CodexCont å·¥å…·ä¸¢å¤±ä¿®å¤ âœ…\(2026-07-15)
@@ -247,3 +248,6 @@
 - [x] å·¥ä½œåŒºå®žçŽ°å‘æ–‡æ¡£:`C:\CCSwitch\docs\`(00â€“07 + state + references);çŸ­å…¥å£ `claude.md`
 - [x] å·¥ä½œåˆ†æ”¯ **`main`**
 - [x] Phase H2 + I ä»£ç å·²æäº¤äºŽ `main`
+=======
+- [x] ÍÆËÍ fork main(9 commit,º¬ rebase ºóµÄÉÏÓÎ 2 commit);`gh workflow run` Êµ²â Windows Build:**³É¹¦**(18m49s,NSIS/MSI/±ãÐ¯°æÈý²úÎïÉÏ´«,run 29335745521)¡ª¡ªÑéÊÕ 14/15/16 Íê³É
+>>>>>>> origin/main
