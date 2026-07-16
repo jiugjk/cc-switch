@@ -716,6 +716,7 @@
       "lastUpstream": "最近上游（已脱敏）",
       "lastFallback": "最近一次切换",
       "quotaFallback": "额度耗尽 → 已切换供应商",
+      "quotaFallbackWithProvider": "额度耗尽 → 已从 {{provider}} 切换",
       "yes": "是",
       "no": "否",
       "protocolValue": {

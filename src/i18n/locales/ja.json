@@ -716,6 +716,7 @@
       "lastUpstream": "直近の上流（マスク済み）",
       "lastFallback": "直近の切り替え",
       "quotaFallback": "クォータ枯渇 → プロバイダーを切り替え",
+      "quotaFallbackWithProvider": "クォータ枯渇 → {{provider}} から切り替え",
       "yes": "はい",
       "no": "いいえ",
       "protocolValue": {

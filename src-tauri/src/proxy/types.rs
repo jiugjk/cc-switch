@@ -108,10 +108,10 @@ pub struct ProxyStatus {
     /// 最近一次因**明确额度/额度耗尽**触发故障转移的脱敏标记。
     ///
     /// 仅在上游返回明确额度错误（quota_exceeded / insufficient_quota /
-    /// credits_exhausted / 402 等，见 `quota_error::is_quota_exhaustion`）并
-    /// 因此切换到下一个 provider 时设置；普通限流（rate_limit）、超时、认证
-    /// 失败、5xx 等都不会写入。用于 UI/日志区分"额度耗尽自动切换"与普通重试。
-    /// 不含任何凭据。
+    /// credits_exhausted / 402 等，见 `quota_error::is_quota_exhaustion`）**且
+    /// 候选链上仍有下一 provider 可切换**时设置；单节点/末节点额度失败不写入。
+    /// 普通限流（rate_limit）、超时、认证失败、5xx 等都不会写入。成功转发后清除。
+    /// 用于 UI/日志区分"额度耗尽自动切换"与普通重试。不含任何凭据。
     #[serde(default)]
     pub last_fallback_reason: Option<String>,
 }

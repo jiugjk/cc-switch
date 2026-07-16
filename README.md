@@ -5,7 +5,7 @@
 ### The All-in-One Manager for Claude Code, Claude Desktop, Codex, Gemini CLI, OpenCode, OpenClaw & Hermes Agent
 
 [![Version](https://img.shields.io/github/v/release/jiugjk/cc-switch?color=blue&label=version)](https://github.com/jiugjk/cc-switch/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/jiugjk/cc-switch/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](https://github.com/jiugjk/cc-switch/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
 [![Downloads](https://img.shields.io/github/downloads/jiugjk/cc-switch/total)](https://github.com/jiugjk/cc-switch/releases/latest)
 
@@ -39,7 +39,7 @@ This repository is a fork of [farion1231/cc-switch](https://github.com/farion123
 
 ### Build
 
-- **Free Windows auto-build** — GitHub Actions (`workflow_dispatch` + push) builds NSIS / MSI / portable artifacts on free hosted runners.
+- **Free Windows auto-build** — GitHub Actions builds **unsigned** NSIS / MSI / portable artifacts on free hosted runners after CI is green on `main` (or via `workflow_dispatch` on `main`). No macOS/Linux installers and no code signing / auto-update channel in this fork.
 
 Open user-side checks: real e2e matrix with proxy on/off; live confirm that ChatGPT desktop traffic hits `127.0.0.1:15721` `/v1/responses` when takeover is enabled.
 
@@ -54,7 +54,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 - **Unified MCP & Skills Management** — One panel to manage MCP servers and Skills across Claude, Codex, Gemini, OpenCode, and Hermes with bidirectional sync
 - **System Tray Quick Switch** — Switch providers instantly from the tray menu, no need to open the full app
 - **Cloud Sync** — Sync provider data across devices via Dropbox, OneDrive, iCloud, or WebDAV servers
-- **Cross-Platform** — Native desktop app for Windows, macOS, and Linux, built with Tauri 2
+- **Cross-Platform (upstream)** — Upstream supports Windows, macOS, and Linux; **this fork's published installers are Windows x64 only**
 - **Built-in Utilities** — Includes various utilities for first-launch login confirmation, signature bypass, plugin extension sync, and more
 
 ## Screenshots
@@ -195,51 +195,22 @@ For detailed guides on every feature, check out the **[User Manual](docs/user-ma
 
 ### System Requirements
 
-- **Windows**: Windows 10 and above
-- **macOS**: macOS 12 (Monterey) and above
-- **Linux**: Ubuntu 22.04+ / Debian 11+ / Fedora 34+ and other mainstream distributions
+- **This fork ships Windows x64 builds only** (Windows 10+). macOS / Linux packages are **not** published by `jiugjk/cc-switch` — use [upstream releases](https://github.com/farion1231/cc-switch/releases) if you need those platforms.
 
-### Windows Users
+### Windows Users (this fork)
 
-Download the latest `CC-Switch-v{version}-Windows.msi` installer or `CC-Switch-v{version}-Windows-Portable.zip` portable version from the [Releases](../../releases) page.
+Download the latest release from the [Releases](../../releases) page. Assets typically include:
 
-### macOS Users
+| Asset | Notes |
+|-------|--------|
+| `*.exe` (NSIS) | Recommended installer |
+| `*.msi` | MSI installer |
+| `CC-Switch-portable-x64.exe` | Portable (when present) |
 
-**Method 1: Install via Homebrew (Recommended)**
-
-```bash
-brew install --cask cc-switch
-```
-
-Update:
-
-```bash
-brew upgrade --cask cc-switch
-```
-
-**Method 2: Manual Download**
-
-Download `CC-Switch-v{version}-macOS.dmg` (recommended) or `.zip` from the [Releases](../../releases) page.
-
-> **Note**: CC Switch for macOS is code-signed and notarized by Apple. You can install and open it directly.
-
-### Arch Linux Users
-
-**Install via paru (Recommended)**
-
-```bash
-paru -S cc-switch-bin
-```
-
-### Linux Users
-
-Download the latest Linux build from the [Releases](../../releases) page:
-
-- `CC-Switch-v{version}-Linux.deb` (Debian/Ubuntu)
-- `CC-Switch-v{version}-Linux.rpm` (Fedora/RHEL/openSUSE)
-- `CC-Switch-v{version}-Linux.AppImage` (Universal)
-
-> **Flatpak**: Not included in official releases. You can build it yourself from the `.deb` — see [`flatpak/README.md`](flatpak/README.md) for instructions.
+> **Notes**
+> - Builds are **unsigned** — Windows SmartScreen may warn; choose "Run anyway".
+> - No fork auto-update channel (`createUpdaterArtifacts` is disabled; no signing key).
+> - Tags look like `v3.17.0-fork.<run_number>` and point at the commit that was built.
 
 <details>
 <summary><strong>Architecture Overview</strong></summary>

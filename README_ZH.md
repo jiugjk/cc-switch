@@ -5,7 +5,7 @@
 ### Claude Code、Claude Desktop、Codex、Gemini CLI、OpenCode、OpenClaw 和 Hermes Agent 的全方位管理工具
 
 [![Version](https://img.shields.io/github/v/release/jiugjk/cc-switch?color=blue&label=version)](https://github.com/jiugjk/cc-switch/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/jiugjk/cc-switch/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](https://github.com/jiugjk/cc-switch/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
 [![Downloads](https://img.shields.io/github/downloads/jiugjk/cc-switch/total)](https://github.com/jiugjk/cc-switch/releases/latest)
 
@@ -39,7 +39,7 @@
 
 ### 构建
 
-- **免费 Windows 自动构建** — GitHub Actions（`workflow_dispatch` + push）在免费托管 runner 上构建 NSIS / MSI / 便携版。
+- **免费 Windows 自动构建** — GitHub Actions 在 `main` 的 **CI 通过后**（或在 `main` 上手动 `workflow_dispatch`）于免费托管 runner 上构建**未签名** NSIS / MSI / 便携版。本 fork **不发布** macOS/Linux 安装包，也无代码签名 / 自动更新通道。
 
 用户侧开放确认：代理开/关的真实请求矩阵；接管开启时确认 ChatGPT 桌面流量进入 `127.0.0.1:15721` `/v1/responses`。
 
@@ -54,7 +54,7 @@
 - **统一 MCP, SKILLS 管理** — 一个面板管理 Claude、Codex、Gemini、OpenCode 和 Hermes 的 MCP, SKILLS, 支持双向同步
 - **系统托盘快速切换** — 从托盘菜单即时切换供应商，无需打开完整应用
 - **云同步** — 通过 Dropbox、OneDrive、iCloud 或 WebDAV 服务器在不同设备之间同步供应商数据
-- **跨平台** — 基于 Tauri 2 构建的原生桌面应用，支持 Windows、macOS 和 Linux
+- **跨平台（上游）** — 上游支持 Windows、macOS 和 Linux；**本 fork 已发布安装包仅为 Windows x64**
 - **小工具** - 内置了多种小工具来解决首次安装登录确认、禁止签名、插件拓展同步等多种功能
 
 ## 界面预览
@@ -197,51 +197,22 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 ### 系统要求
 
-- **Windows**：Windows 10 及以上
-- **macOS**：macOS 12 (Monterey) 及以上
-- **Linux**：Ubuntu 22.04+ / Debian 11+ / Fedora 34+ 等主流发行版
+- **本 fork 仅发布 Windows x64 构建**（Windows 10+）。macOS / Linux 安装包**不由** `jiugjk/cc-switch` 发布 — 需要这些平台请使用 [上游 Releases](https://github.com/farion1231/cc-switch/releases)。
 
-### Windows 用户
+### Windows 用户（本 fork）
 
-从 [Releases](../../releases) 页面下载最新版本的 `CC-Switch-v{版本号}-Windows.msi` 安装包或 `CC-Switch-v{版本号}-Windows-Portable.zip` 绿色版。
+从 [Releases](../../releases) 页面下载最新版本。产物通常包括：
 
-### macOS 用户
+| 文件 | 说明 |
+|------|------|
+| `*.exe`（NSIS） | 推荐安装器 |
+| `*.msi` | MSI 安装包 |
+| `CC-Switch-portable-x64.exe` | 便携版（若存在） |
 
-**方式一：通过 Homebrew 安装（推荐）**
-
-```bash
-brew install --cask cc-switch
-```
-
-更新：
-
-```bash
-brew upgrade --cask cc-switch
-```
-
-**方式二：手动下载**
-
-从 [Releases](../../releases) 页面下载 `CC-Switch-v{版本号}-macOS.dmg`（推荐）或 `.zip`。
-
-> **注意**：CC Switch macOS 版本已通过 Apple 代码签名和公证，可直接安装打开。
-
-### Arch Linux 用户
-
-**通过 paru 安装（推荐）**
-
-```bash
-paru -S cc-switch-bin
-```
-
-### Linux 用户
-
-从 [Releases](../../releases) 页面下载最新版本的 Linux 安装包：
-
-- `CC-Switch-v{版本号}-Linux.deb`（Debian/Ubuntu）
-- `CC-Switch-v{版本号}-Linux.rpm`（Fedora/RHEL/openSUSE）
-- `CC-Switch-v{版本号}-Linux.AppImage`（通用）
-
-> **Flatpak**：官方 Release 不包含 Flatpak 包。如需使用，可从 `.deb` 自行构建 — 参见 [`flatpak/README.md`](flatpak/README.md)。
+> **说明**
+> - **未代码签名**：Windows SmartScreen 可能提示，选「仍要运行」即可。
+> - **无自动更新通道**：构建关闭了 `createUpdaterArtifacts`（无签名密钥）。
+> - 标签形如 `v3.17.0-fork.<run_number>`，并指向实际构建的提交。
 
 <details>
 <summary><strong>架构总览</strong></summary>

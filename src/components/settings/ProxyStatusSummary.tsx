@@ -19,29 +19,47 @@ export function ProxyStatusSummary() {
   const { t } = useTranslation();
   const { status, isRunning, isTakeoverActive } = useProxyStatus();
 
-  // 代理从未启动过且无任何状态时，不占用 General 页空间。
-  if (!status) return null;
+  // 代理从未启动过且无任何路由/流量痕迹时，不占用 General 页空间。
+  // get_proxy_status 在停止时仍返回 Default 对象，不能仅用 `!status`。
+  if (
+    !status ||
+    (!status.running &&
+      !status.last_route_protocol &&
+      !status.last_fallback_reason &&
+      (status.total_requests ?? 0) === 0)
+  ) {
+    return null;
+  }
 
   const listenAddress =
     status.address && status.port ? `${status.address}:${status.port}` : "—";
 
-  const rows: { label: string; value: string; mono?: boolean }[] = [
+  const rows: {
+    key: string;
+    label: string;
+    value: string;
+    mono?: boolean;
+  }[] = [
     {
+      key: "listen",
       label: t("settings.proxyStatus.listenAddress"),
       value: listenAddress,
       mono: true,
     },
     {
+      key: "logical",
       label: t("settings.proxyStatus.logicalProvider"),
       value: status.current_provider ?? "—",
     },
     {
+      key: "takeover",
       label: t("settings.proxyStatus.routedThroughCcSwitch"),
       value: isTakeoverActive
         ? t("settings.proxyStatus.yes")
         : t("settings.proxyStatus.no"),
     },
     {
+      key: "protocol",
       label: t("settings.proxyStatus.protocol"),
       value: status.last_route_protocol
         ? t(
@@ -53,6 +71,7 @@ export function ProxyStatusSummary() {
         : "—",
     },
     {
+      key: "continuation",
       label: t("settings.proxyStatus.continuation"),
       value: status.last_route_continuation
         ? t(
@@ -62,6 +81,7 @@ export function ProxyStatusSummary() {
         : "—",
     },
     {
+      key: "upstream",
       label: t("settings.proxyStatus.lastUpstream"),
       value: status.last_masked_upstream ?? "—",
       mono: true,
@@ -69,11 +89,23 @@ export function ProxyStatusSummary() {
   ];
 
   if (status.last_fallback_reason) {
+    // Backend stores `quota_exhausted:{app}:{provider}` (no credentials).
+    const parts = status.last_fallback_reason.split(":");
+    const providerHint =
+      parts[0] === "quota_exhausted" && parts.length >= 3
+        ? parts.slice(2).join(":")
+        : null;
     rows.push({
+      key: "fallback",
       label: t("settings.proxyStatus.lastFallback"),
-      value: t("settings.proxyStatus.quotaFallback", {
-        defaultValue: "配额耗尽切换",
-      }),
+      value: providerHint
+        ? t("settings.proxyStatus.quotaFallbackWithProvider", {
+            provider: providerHint,
+            defaultValue: `Quota exhausted → switched from ${providerHint}`,
+          })
+        : t("settings.proxyStatus.quotaFallback", {
+            defaultValue: "Quota exhausted → switched provider",
+          }),
     });
   }
 
@@ -91,7 +123,7 @@ export function ProxyStatusSummary() {
           <Activity
             className={`h-4 w-4 ${
               isRunning
-                ? "text-green-500 animate-pulse"
+                ? "text-green-500 motion-safe:animate-pulse"
                 : "text-muted-foreground"
             }`}
           />
@@ -109,14 +141,13 @@ export function ProxyStatusSummary() {
         <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {rows.map((row) => (
             <div
-              key={row.label}
+              key={row.key}
               className="flex flex-col gap-0.5 rounded-lg bg-background/60 p-2.5"
             >
               <dt className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                {row.label === t("settings.proxyStatus.protocol") ? (
+                {row.key === "protocol" ? (
                   <Radio className="h-3 w-3" />
-                ) : row.label ===
-                  t("settings.proxyStatus.routedThroughCcSwitch") ? (
+                ) : row.key === "takeover" ? (
                   <Shuffle className="h-3 w-3" />
                 ) : null}
                 {row.label}

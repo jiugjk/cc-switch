@@ -361,9 +361,10 @@ pub struct AppSettings {
     pub enable_local_proxy: bool,
     /// 使用自定义 API 时不依赖 ChatGPT 官方额度（默认关闭，向后兼容）。
     ///
-    /// 开启后，当用户选中的当前 provider 是自定义第三方 provider 时，代理转发层
-    /// 会明确避免把请求路由到内置官方 Codex provider（官方额度依赖），并保证
-    /// 官方 ChatGPT 登录凭据（auth.json / 客户端 bearer）不会被发送给第三方。
+    /// 开启后，Codex 链路的转发候选链中若**存在至少一个非官方 provider**，则
+    /// 从候选中剔除内置官方 Codex provider，使请求不会静默回退到官方额度；
+    /// 若链上仅有官方 provider，则保留官方通道（不滤空）。认证头仍按
+    /// per-provider 解析，官方 ChatGPT 登录凭据不会发给第三方。
     /// 仅作用于 Codex CLI（及指向本地代理的客户端）链路；对微软商店版 ChatGPT
     /// 桌面应用 UI 内流量无法合规接管，详见报告限制说明。
     #[serde(default)]
@@ -939,10 +940,10 @@ pub fn unify_codex_session_history() -> bool {
 
 /// 「使用自定义 API 时不依赖 ChatGPT 官方额度」开关。
 ///
-/// 开启后，被接管的目标客户端（Codex CLI 链路）应明确走用户选择的自定义
-/// provider，而不消耗官方额度、不把官方 ChatGPT 凭据发给第三方。默认关闭，
-/// 保持向后兼容。仅适用于 CC Switch 能接管的链路；MS Store ChatGPT 桌面应用
-/// 的 UI 内流量无法合规接管（详见报告限制说明）。
+/// 开启后，Codex 转发候选链在存在非官方 provider 时剔除内置官方 Codex，
+/// 避免静默消耗官方额度；官方-only 链保留。默认关闭，保持向后兼容。
+/// 仅适用于 CC Switch 能接管的链路；MS Store ChatGPT 桌面应用的 UI 内流量
+/// 无法合规接管（详见报告限制说明）。
 pub fn decouple_official_quota() -> bool {
     settings_store()
         .read()

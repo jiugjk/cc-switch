@@ -716,6 +716,7 @@
       "lastUpstream": "Last upstream (masked)",
       "lastFallback": "Last fallback",
       "quotaFallback": "Quota exhausted → switched provider",
+      "quotaFallbackWithProvider": "Quota exhausted → switched from {{provider}}",
       "yes": "Yes",
       "no": "No",
       "protocolValue": {

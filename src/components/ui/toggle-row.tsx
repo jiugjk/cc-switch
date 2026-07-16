@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { Switch } from "@/components/ui/switch";
 
 export interface ToggleRowProps {
@@ -17,6 +18,8 @@ export function ToggleRow({
   onCheckedChange,
   disabled,
 }: ToggleRowProps) {
+  const descriptionId = useId();
+
   return (
     <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card/50 p-4 transition-colors hover:bg-muted/50">
       <div className="flex items-center gap-3">
@@ -26,7 +29,9 @@ export function ToggleRow({
         <div className="space-y-1">
           <p className="text-sm font-medium leading-none">{title}</p>
           {description ? (
-            <p className="text-xs text-muted-foreground">{description}</p>
+            <p id={descriptionId} className="text-xs text-muted-foreground">
+              {description}
+            </p>
           ) : null}
         </div>
       </div>
@@ -35,6 +40,7 @@ export function ToggleRow({
         onCheckedChange={onCheckedChange}
         disabled={disabled}
         aria-label={title}
+        aria-describedby={description ? descriptionId : undefined}
       />
     </div>
   );

@@ -211,11 +211,16 @@ export function useProxyStatus() {
     isLoading,
     isRunning: status?.running || false,
     takeoverStatus,
-    isTakeoverActive:
+    isTakeoverActive: Boolean(
       takeoverStatus?.claude ||
-      takeoverStatus?.codex ||
-      takeoverStatus?.gemini ||
-      false,
+        takeoverStatus?.codex ||
+        takeoverStatus?.gemini ||
+        takeoverStatus?.opencode ||
+        takeoverStatus?.openclaw ||
+        // TS-only extras (when backend later exposes them)
+        takeoverStatus?.["claude-desktop"] ||
+        takeoverStatus?.hermes,
+    ),
 
     // 启动/停止（总开关）
     startProxyServer: startProxyServerMutation.mutateAsync,

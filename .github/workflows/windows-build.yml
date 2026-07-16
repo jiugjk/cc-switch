@@ -1,16 +1,21 @@
 name: Windows Build
 
 # Free automated Windows builds for the fork: no signing key or updater
-# secrets required. Every successful main build creates a GitHub Release
-# v3.17.0-fork.<run_number> with NSIS / MSI / portable assets.
+# secrets required. Publishes only after CI succeeds on main (or manual
+# dispatch on main). Each successful publish creates
+# Release v{package.version}-fork.<run_number> with NSIS / MSI / portable.
 on:
   workflow_dispatch:
-  push:
+  # Gate releases on green CI instead of racing a parallel push trigger.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
 
 concurrency:
-  group: windows-build-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a release mid-upload (half-published tags/assets).
+  group: windows-build-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -19,9 +24,27 @@ jobs:
   build:
     name: Build Windows x64 (NSIS + MSI)
     runs-on: windows-2022
+    # Manual: main only. Auto: only when the triggering CI run on main succeeded.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     steps:
+      - name: Resolve build SHA
+        id: rev
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.rev.outputs.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -56,6 +79,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Defense in depth: CI already gated workflow_run, but dispatch / flaky
+      # workflow_run still get a typecheck before a multi-hour build.
+      - name: TypeScript type check
+        run: pnpm typecheck
 
       # tauri.conf.json enables createUpdaterArtifacts, which requires the
       # TAURI_SIGNING_PRIVATE_KEY secret. This fork build has no signing key,
@@ -92,36 +120,45 @@ jobs:
             echo "expected at least nsis+msi in dist-release, got $count" >&2
             exit 1
           fi
-          echo "tag=v3.17.0-fork.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          VERSION=$(node -p "require('./package.json').version")
+          echo "tag=v${VERSION}-fork.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "sha=${{ steps.rev.outputs.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
         with:
-          name: cc-switch-windows-x64-nsis-${{ github.sha }}
+          name: cc-switch-windows-x64-nsis-${{ steps.rev.outputs.sha }}
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
       - name: Upload MSI installer
         uses: actions/upload-artifact@v4
         with:
-          name: cc-switch-windows-x64-msi-${{ github.sha }}
+          name: cc-switch-windows-x64-msi-${{ steps.rev.outputs.sha }}
           path: src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
 
       - name: Upload portable executable
         uses: actions/upload-artifact@v4
         with:
-          name: cc-switch-windows-x64-portable-${{ github.sha }}
-          path: src-tauri/target/release/*.exe
-          if-no-files-found: error
+          name: cc-switch-windows-x64-portable-${{ steps.rev.outputs.sha }}
+          path: dist-release/CC-Switch-portable-x64.exe
+          if-no-files-found: warn
 
       - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        # Only main (push via green CI, or dispatch on main) publishes.
+        if: >-
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.head_branch == 'main' &&
+           github.event.workflow_run.conclusion == 'success')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.assets.outputs.tag }}
           name: ${{ steps.assets.outputs.tag }}
+          target_commitish: ${{ steps.rev.outputs.sha }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           body: |
             ## CC Switch fork — Windows 构建
 
@@ -134,7 +171,7 @@ jobs:
             - **额度归因**：`quota_error` + `last_fallback_reason`；可选 `decouple_official_quota`
             - **能力解析**：声明/启发式 Provider 能力快照
             - **应用探测**：焦点重探测、MS Store Codex 桌面包
-            - **Windows CI**：无签名 NSIS / MSI / 便携版
+            - **Windows CI**：无签名 NSIS / MSI / 便携版（CI 绿后才发版）
 
             ### 安装包
 
@@ -148,7 +185,7 @@ jobs:
 
             - **未代码签名**：Windows 可能提示 SmartScreen，选「仍要运行」即可。
             - **无自动更新通道**：本构建关闭了 `createUpdaterArtifacts`（无签名密钥）。
-            - 提交：`${{ github.sha }}` · 工作流 run：`${{ github.run_number }}`
+            - 提交：`${{ steps.rev.outputs.sha }}` · 工作流 run：`${{ github.run_number }}`
             - 上游赞助商列表见 [farion1231/cc-switch](https://github.com/farion1231/cc-switch#heartsponsor)
 
             ### 致谢
