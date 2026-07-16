@@ -11,7 +11,7 @@
 - [x] 本机工具链确认:node v24.14.0 / pnpm 11.5.1 / rustc 1.94.0 / cargo 1.94.0
 - [x] 创建本文件 progress.md
 
-前期勘察(只读,位于 `C:\CCSwitch\.explore\`,与本 clone 同 commit,结论可直接使用):
+前期勘察(只读,结论可直接使用):
 
 - 代理转发/路由/重试/故障转移唯一入口:`src-tauri/src/proxy/forwarder.rs::RequestForwarder::forward_with_retry`
 - `/v1/responses` 处理:`src-tauri/src/proxy/handlers.rs::handle_responses`
@@ -112,7 +112,7 @@
 
 - [x] 推送 fork main(9 commit,含 rebase 后的上游 2 commit);`gh workflow run` 实测 Windows Build:**成功**(18m49s,NSIS/MSI/便携版三产物上传,run 29335745521)——验收 14/15/16 完成
 
-## 阶段 F:Debian 无头版(分支 `debian-headless`)——架构勘察结论(2026-07-14)
+## 阶段 F:Debian 无头版——架构勘察结论(2026-07-14)（已放弃，勿恢复）
 
 三份并行只读勘察(命令面 / 参考 TUI 可复用性 / 前端 IPC 面)+ tauri 2.10 crate 机制核查,结论:
 
@@ -188,14 +188,13 @@
 
 ### H0 决策变更
 
-- **Phase F(Debian 无头版)已由用户决定放弃**,不再推进。相关架构勘察(阶段 F)保留作历史参考,但不再作为待办。见工作区 `docs/archive/phase-f-abandoned.md`。
-- 下一步任务定为 Newest Task(代理真实语义/Base URL 展示/登录额度解耦/quota 归因/capability 检测);可执行规格曾在根目录 `PROJECT-STATE-AND-NEXT-TASK.md`,**现已折入** `C:\CCSwitch\docs\`(state + 02/05 等)。D1–D4 见阶段 I。
+- **Phase F(Debian 无头版)已由用户决定放弃**,不再推进。相关架构勘察(阶段 F)仅作历史参考,见工作区 `docs/archive/phase-f-abandoned.md`。
+- 代理真实语义 / 可观测状态 / 能力检测 / 额度归因(D1–D4)见阶段 I;实现向文档见 `C:\CCSwitch\docs\`。
 
 ### H1 文档审计(5-agent 并行只读核验)
 
 - 逐条核验 progress.md 阶段 A–G 全部声明对得上真实代码/测试(附 file:line),无夸大。唯一小出入:G2 声称 17 个用例,实际 16 个 `it()`。
-- 发现并已修正的文档陈旧点:CLAUDE.md「Fork additions」原只列到 Phase A–E,已补齐 Phase G 四项(useInstalledApps 运行期重探测、Codex 文案联动、codex_desktop.rs MS Store 检测、CodexCont 工具丢失三修复);Phase F 由「planned but not started」改为「已放弃」;补记 README_DE 存在。
-- 8 份 `.recon-*.md`、两份已完成任务书当时加横幅存档;随后(同日用户决定激进整理)内容折入 `C:\CCSwitch\docs\` 后**删除**根任务大文档与 `.explore/` 参考克隆;remote 清单见 `docs/references.md`。
+- 文档入口统一为 `C:\CCSwitch\docs\` + 短 `claude.md`;工作分支为 `main`。
 
 ### H2 审计发现的遗留 bug 修复(3 项,均带测试)
 
@@ -209,9 +208,9 @@
 - [x] `cargo fmt --check` / `cargo clippy -- -D warnings`:干净
 - [x] 文档改动零代码影响;历史文件横幅均为 UTF-8 正确写入
 
-## 阶段 I:代理真实语义可观测化 + capability 检测 + 故障转移额度归因 + 登录额度解耦（Newest Task D1–D4）✅（2026-07-16，代码已提交；D5/I6 现场仍开放）
+## 阶段 I:代理真实语义可观测化 + capability 检测 + 故障转移额度归因 + 登录额度解耦（D1–D4）✅（2026-07-16；D5/I6 现场仍开放）
 
-任务目标(逐字):不再以「Codex 配置页面中的 Base URL 是否变化」判断代理是否生效,而是完整确认并修正 Codex 运行时请求如何进入 CC Switch 代理、代理如何选择第三方上游、CodexCont 和路由功能在哪一层执行、关闭代理后哪些功能会失效;在此基础上完成登录额度解耦、quota 归因(不新开独立 fallback 开关)、协议能力适配、风险修复、真实验证和 Git 提交。实现向文档见 `C:\CCSwitch\docs\`(尤其 02/05/state)。
+任务目标:不再以「Codex 配置页面中的 Base URL 是否变化」判断代理是否生效,而是完整确认并修正 Codex 运行时请求如何进入 CC Switch 代理、代理如何选择第三方上游、CodexCont 和路由功能在哪一层执行、关闭代理后哪些功能会失效;在此基础上完成登录额度解耦、quota 归因(不新开独立 fallback 开关)、协议能力适配与验证。实现向文档见 `C:\CCSwitch\docs\`(尤其 02/05/state)。
 
 ### I0 侦察修正(先确认真实语义,再改)
 
@@ -272,9 +271,8 @@
 - **建议**:路由视为已由分支 A 解决(与 codex CLI 相同机制,因共用 `~/.codex` 与同一引擎);不要加系统/正向代理(会过度捕获鉴权流量)。唯一开放项是经验性的:用户启动应用并在 cc-switch 日志确认请求落在 127.0.0.1:15721。并需对用户设定预期:应用的 ChatGPT 登录/额度 UI 不受 cc-switch 影响,可能显示与代理上游实际所服务的账号状态不一致。
 - [ ] **待用户现场确认**:启动 ChatGPT 桌面应用发一条消息,观察 cc-switch 日志中出现命中 `127.0.0.1:15721` 的 `/v1/responses` 请求(与 D5 一并回填)
 
-### I7 工作区文档激进整理(2026-07-16,与 H/I 提交同批)
+### I7 工作区文档与分支收尾(2026-07-16)
 
-- [x] 新建 `C:\CCSwitch\docs\` Vibe 文档集(00–07 + state + references + archive/phase-f)
-- [x] 瘦身 `C:\CCSwitch\claude.md` 为短入口
-- [x] 删除 `.explore/`、`PROJECT-STATE-AND-NEXT-TASK.md`、`Newest Task.md`、`.plan-newest-task.md`(内容已折入 docs)
-- [x] Phase H2 + I 代码按逻辑拆 commit(本地,不 push)
+- [x] 工作区实现向文档:`C:\CCSwitch\docs\`(00–07 + state + references + archive/phase-f);短入口 `claude.md`
+- [x] 工作分支统一为 **`main`**(原历史名分支已弃用)
+- [x] Phase H2 + I 代码已提交于 `main`
