@@ -1,6 +1,6 @@
 # 项目进度记录(progress.md)
 
-任务:CC Switch × CodexCont 集成 + Windows 构建 + Debian 无头版
+任务:CC Switch × CodexCont 集成 + Windows 构建 + 代理真实语义/能力/额度
 基线:farion1231/cc-switch v3.17.0(commit c8b0d60c),fork 到 jiugjk/cc-switch
 
 ## 阶段 0:仓库准备 ✅(2026-07-14)
@@ -17,7 +17,7 @@
 - `/v1/responses` 处理:`src-tauri/src/proxy/handlers.rs::handle_responses`
 - Responses→Chat / Responses→Anthropic 转换判定:`src-tauri/src/proxy/providers/codex.rs::should_convert_codex_responses_to_{chat,anthropic}`
 - 参考 fork(2836048681/cc-switch-codexcont,基线 3.16.5)的 `proxy/codex_continue.rs` 自包含、可近乎机械化移植到 3.17.0
-- cc-switch-cli(SaladDay)提供 ratatui TUI/clap CLI/daemon 可借鉴,但其 proxy/database 为旧快照不可回移
+- 第三方 CLI 参考仓(SaladDay/cc-switch-cli)的 clap/CLI 层可借鉴,但其 proxy/database 为旧快照不可回移
 
 ## 阶段 A:CodexCont 集成 ✅(2026-07-14)
 
@@ -112,34 +112,6 @@
 
 - [x] 推送 fork main(9 commit,含 rebase 后的上游 2 commit);`gh workflow run` 实测 Windows Build:**成功**(18m49s,NSIS/MSI/便携版三产物上传,run 29335745521)——验收 14/15/16 完成
 
-## 阶段 F:Debian 无头版——架构勘察结论(2026-07-14)（已放弃，勿恢复）
-
-三份并行只读勘察(命令面 / 参考 TUI 可复用性 / 前端 IPC 面)+ tauri 2.10 crate 机制核查,结论:
-
-**命令面(288 个 Tauri 命令)**
-
-- 261 个(91%)仅依赖 4 个托管 State(AppState / SkillServiceState / CopilotAuthState / CodexOAuthState),可直接 HTTP 化;全 codebase **零 `ipc::Channel`**。
-- 仅 27 个非平凡:opener(6)、dialog(4)、updater(2)、store(2)、tray/window/lightweight(6)、桌面副作用(clipboard/terminal/auto-launch 等 6);全部可枚举、可 stub 或客户端替代。
-- 需 WS 桥的事件仅 **12 个,纯单向 server→client 推送**(前端只 listen 从不 emit)。
-
-**前端(React,零改动复用可行)**
-
-- `invoke` 是唯一符号、294 处调用、**无中间包装层** → 一个 Vite alias(`@tauri-apps/api/core`)全覆盖;`listen` 同理。
-- 仓库现成 `tests/msw/tauriMocks.ts` = 已验证的 HTTP invoke + 内存 listen shim,作浏览器 shim 模板。
-- 需浏览器替代的原生流(10 个):文件/目录选择器、导入导出、开文件夹/终端、`open_external`、窗口控制条。
-
-**Rust 无头化——头号风险与方案**
-
-- tauri 2.10:Linux 上 `webkit2gtk` 是 `optional`(挂 `wry`),`gtk` 是硬依赖;目标"无 WebKitGTK"= 去 `wry`/webkit,保留 tauri+gtk 链接(不调 `gtk::init` 即可无 X 载入)。
-- **裸 `AppHandle` = `AppHandle<Wry>`**:26 命令 + 4 处 service 存储点钉死 wry 运行时。
-- 方案:引入 `EventSink` trait,桌面 impl 包 `AppHandle`、无头 impl 包 `broadcast::Sender`(→ WS);核心与运行时解耦。
-- Cargo:`default = ["gui"]` 收纳 wry/tray/webkit/plugins(桌面构建字节级不变);`headless` = axum + argon2 + `tauri/test`,新增第二 `[[bin]]`。
-
-**参考 cc-switch-cli 复用度**
-
-- clap CLI + ratatui 渲染层 near-verbatim;数据/动作层(~17K LOC)需适配目标新签名(`AppState::new`、无 `state.config`、`add` 多参、`switch` 返回 `SwitchResult`、`AppType::ClaudeDesktop` 新臂)。
-- **daemon supervisor(1860 LOC)丢弃**(绑死旧多 worker 代理模型);无头改用 axum + systemd `Restart=always`。
-
 ## 阶段 G:上游同步 + 切换栏运行期重探测 + Codex 文案 + MS Store Codex 检测 + CodexCont 工具丢失修复 ✅\(2026-07-15)
 
 ### G1 上游同步(merge commit 573c92da)
@@ -186,9 +158,8 @@
 
 ## 阶段 H:文档审计 + 历史整理 + 遗留 bug 修复 ✅(2026-07-16)
 
-### H0 决策变更
+### H0
 
-- **Phase F(Debian 无头版)已由用户决定放弃**,不再推进。相关架构勘察(阶段 F)仅作历史参考,见工作区 `docs/archive/phase-f-abandoned.md`。
 - 代理真实语义 / 可观测状态 / 能力检测 / 额度归因(D1–D4)见阶段 I;实现向文档见 `C:\CCSwitch\docs\`。
 
 ### H1 文档审计(5-agent 并行只读核验)
@@ -271,8 +242,8 @@
 - **建议**:路由视为已由分支 A 解决(与 codex CLI 相同机制,因共用 `~/.codex` 与同一引擎);不要加系统/正向代理(会过度捕获鉴权流量)。唯一开放项是经验性的:用户启动应用并在 cc-switch 日志确认请求落在 127.0.0.1:15721。并需对用户设定预期:应用的 ChatGPT 登录/额度 UI 不受 cc-switch 影响,可能显示与代理上游实际所服务的账号状态不一致。
 - [ ] **待用户现场确认**:启动 ChatGPT 桌面应用发一条消息,观察 cc-switch 日志中出现命中 `127.0.0.1:15721` 的 `/v1/responses` 请求(与 D5 一并回填)
 
-### I7 工作区文档与分支收尾(2026-07-16)
+### I7 工作区文档收尾(2026-07-16)
 
-- [x] 工作区实现向文档:`C:\CCSwitch\docs\`(00–07 + state + references + archive/phase-f);短入口 `claude.md`
-- [x] 工作分支统一为 **`main`**(原历史名分支已弃用)
+- [x] 工作区实现向文档:`C:\CCSwitch\docs\`(00–07 + state + references);短入口 `claude.md`
+- [x] 工作分支 **`main`**
 - [x] Phase H2 + I 代码已提交于 `main`
