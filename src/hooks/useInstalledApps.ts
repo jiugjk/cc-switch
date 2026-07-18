@@ -28,7 +28,8 @@ export async function probeInstalledApps(): Promise<InstalledApps> {
     "claude-desktop": desktopInstalled,
   };
   for (const tool of tools) {
-    next[tool.name as AppId] = Boolean(tool.version);
+    const appId = tool.name === "grok" ? "grokbuild" : (tool.name as AppId);
+    next[appId] = Boolean(tool.version);
   }
   // 任一有效 Codex 客户端（CLI 或桌面应用）在装即显示 Codex 入口；
   // 两者官方共享 ~/.codex，现有配置管理对桌面应用同样生效。

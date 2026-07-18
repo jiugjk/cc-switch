@@ -50,6 +50,7 @@ const allVisible: VisibleApps = {
   "claude-desktop": true,
   codex: true,
   gemini: true,
+  grokbuild: true,
   opencode: true,
   openclaw: true,
   hermes: true,
@@ -127,6 +128,7 @@ describe("probeInstalledApps", () => {
           toolVersion("claude", "1.0.0"),
           toolVersion("codex", null, "not installed or not executable"),
           toolVersion("gemini", "2.0.0"),
+          toolVersion("grok", "0.1.0"),
         ]);
       }
       if (command === "is_claude_desktop_installed") {
@@ -142,6 +144,8 @@ describe("probeInstalledApps", () => {
     expect(result.claude).toBe(true);
     expect(result.codex).toBe(false);
     expect(result.gemini).toBe(true);
+    expect(result.grokbuild).toBe(true);
+    expect(result).not.toHaveProperty("grok");
     expect(result["claude-desktop"]).toBe(false);
   });
 

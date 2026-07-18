@@ -54,6 +54,7 @@ export interface ProxyTakeoverStatus {
   "claude-desktop"?: boolean;
   codex: boolean;
   gemini: boolean;
+  grokbuild: boolean;
   opencode: boolean;
   openclaw: boolean;
   hermes: boolean;

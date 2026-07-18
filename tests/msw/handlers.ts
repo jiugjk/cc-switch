@@ -348,6 +348,7 @@ export const handlers = [
       "claude-desktop": false,
       codex: false,
       gemini: false,
+      grokbuild: false,
       opencode: false,
       openclaw: false,
       hermes: false,
