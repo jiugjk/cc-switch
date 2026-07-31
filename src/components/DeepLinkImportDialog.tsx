@@ -16,7 +16,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { PromptConfirmation } from "./deeplink/PromptConfirmation";
 import { McpConfirmation } from "./deeplink/McpConfirmation";
 import { SkillConfirmation } from "./deeplink/SkillConfirmation";
+import { parseConfigPreview } from "./deeplink/parseConfigPreview";
 import { ProviderIcon } from "./ProviderIcon";
+import { maskSecret, maskSensitiveValue } from "@/lib/utils/maskSecret";
 
 interface DeeplinkError {
   url: string;
@@ -79,7 +81,7 @@ export function DeepLinkImportDialog() {
 
     // Listen for deep link error events
     const unlistenError = listen<DeeplinkError>("deeplink-error", (event) => {
-      console.error("Deep link error:", event.payload);
+      console.error("Deep link error:", event.payload.error);
       toast.error(t("deeplink.parseError"), {
         description: event.payload.error,
       });
@@ -206,11 +208,8 @@ export function DeepLinkImportDialog() {
     setIsOpen(false);
   };
 
-  // Mask API key for display (show first 4 chars + ***)
-  const maskedApiKey =
-    request?.apiKey && request.apiKey.length > 4
-      ? `${request.apiKey.substring(0, 4)}${"*".repeat(20)}`
-      : "****";
+  // Mask API key for display (unified helper; masking is display-only)
+  const maskedApiKey = request?.apiKey ? maskSecret(request.apiKey) : "****";
 
   // Check if config file is present
   const hasConfigFile = !!(request?.config || request?.configUrl);
@@ -220,74 +219,11 @@ export function DeepLinkImportDialog() {
       ? "url"
       : null;
 
-  // Parse config file content for display
-  interface ParsedConfig {
-    type: "claude" | "codex" | "gemini";
-    env?: Record<string, string>;
-    auth?: Record<string, string>;
-    tomlConfig?: string;
-    raw: Record<string, unknown>;
-  }
-
-  // Helper to decode base64 with UTF-8 support
-  const b64ToUtf8 = (str: string): string => {
-    try {
-      const binString = atob(str);
-      const bytes = Uint8Array.from(binString, (m) => m.codePointAt(0) || 0);
-      return new TextDecoder().decode(bytes);
-    } catch (e) {
-      console.error("Failed to decode base64:", e);
-      return atob(str);
-    }
-  };
-
-  const parsedConfig = useMemo((): ParsedConfig | null => {
-    if (!request?.config) return null;
-    try {
-      const decoded = b64ToUtf8(request.config);
-      const parsed = JSON.parse(decoded) as Record<string, unknown>;
-
-      if (request.app === "claude") {
-        // Claude 格式: { env: { ANTHROPIC_AUTH_TOKEN: ..., ... } }
-        return {
-          type: "claude",
-          env: (parsed.env as Record<string, string>) || {},
-          raw: parsed,
-        };
-      } else if (request.app === "codex") {
-        // Codex 格式: { auth: { OPENAI_API_KEY: ... }, config: "TOML string" }
-        return {
-          type: "codex",
-          auth: (parsed.auth as Record<string, string>) || {},
-          tomlConfig: (parsed.config as string) || "",
-          raw: parsed,
-        };
-      } else if (request.app === "gemini") {
-        // Gemini 格式: 扁平结构 { GEMINI_API_KEY: ..., GEMINI_BASE_URL: ... }
-        return {
-          type: "gemini",
-          env: parsed as Record<string, string>,
-          raw: parsed,
-        };
-      }
-      return null;
-    } catch (e) {
-      console.error("Failed to parse config:", e);
-      return null;
-    }
-  }, [request?.config, request?.app]);
-
-  // Helper to mask sensitive values
-  const maskValue = (key: string, value: string): string => {
-    const sensitiveKeys = ["TOKEN", "KEY", "SECRET", "PASSWORD"];
-    const isSensitive = sensitiveKeys.some((k) =>
-      key.toUpperCase().includes(k),
-    );
-    if (isSensitive && value.length > 8) {
-      return `${value.substring(0, 8)}${"*".repeat(12)}`;
-    }
-    return value;
-  };
+  // Parse config file content for display (all deeplink apps)
+  const configPreview = useMemo(
+    () => (request ? parseConfigPreview(request) : null),
+    [request],
+  );
 
   const getTitle = () => {
     if (!request) return t("deeplink.confirmImport");
@@ -514,18 +450,17 @@ export function DeepLinkImportDialog() {
                         </div>
                       </div>
 
-                      {/* Parsed Config Details */}
-                      {parsedConfig && (
+                      {/* Parsed Config Details (generic for all deeplink apps) */}
+                      {configPreview && (
                         <div className="rounded-lg bg-muted/50 p-3 space-y-2">
                           <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                             {t("deeplink.configDetails")}
                           </div>
 
-                          {/* Claude config */}
-                          {parsedConfig.type === "claude" &&
-                            parsedConfig.env && (
+                          {configPreview.entries &&
+                            Object.keys(configPreview.entries).length > 0 && (
                               <div className="space-y-1.5">
-                                {Object.entries(parsedConfig.env).map(
+                                {Object.entries(configPreview.entries).map(
                                   ([key, value]) => (
                                     <div
                                       key={key}
@@ -535,7 +470,7 @@ export function DeepLinkImportDialog() {
                                         {key}
                                       </span>
                                       <span className="font-mono truncate">
-                                        {maskValue(key, String(value))}
+                                        {maskSensitiveValue(key, value)}
                                       </span>
                                     </div>
                                   ),
@@ -543,68 +478,17 @@ export function DeepLinkImportDialog() {
                               </div>
                             )}
 
-                          {/* Codex config */}
-                          {parsedConfig.type === "codex" && (
-                            <div className="space-y-2">
-                              {parsedConfig.auth &&
-                                Object.keys(parsedConfig.auth).length > 0 && (
-                                  <div className="space-y-1.5">
-                                    <div className="text-xs text-muted-foreground">
-                                      Auth:
-                                    </div>
-                                    {Object.entries(parsedConfig.auth).map(
-                                      ([key, value]) => (
-                                        <div
-                                          key={key}
-                                          className="grid grid-cols-2 gap-2 text-xs pl-2"
-                                        >
-                                          <span className="font-mono text-muted-foreground truncate">
-                                            {key}
-                                          </span>
-                                          <span className="font-mono truncate">
-                                            {maskValue(key, String(value))}
-                                          </span>
-                                        </div>
-                                      ),
-                                    )}
-                                  </div>
-                                )}
-                              {parsedConfig.tomlConfig && (
-                                <div className="space-y-1">
-                                  <div className="text-xs text-muted-foreground">
-                                    TOML Config:
-                                  </div>
-                                  <pre className="text-xs font-mono bg-background p-2 rounded overflow-x-auto max-h-24 whitespace-pre-wrap">
-                                    {parsedConfig.tomlConfig.substring(0, 300)}
-                                    {parsedConfig.tomlConfig.length > 300 &&
-                                      "..."}
-                                  </pre>
-                                </div>
-                              )}
+                          {configPreview.tomlText && (
+                            <div className="space-y-1">
+                              <div className="text-xs text-muted-foreground">
+                                TOML Config:
+                              </div>
+                              <pre className="text-xs font-mono bg-background p-2 rounded overflow-x-auto max-h-24 whitespace-pre-wrap">
+                                {configPreview.tomlText.substring(0, 300)}
+                                {configPreview.tomlText.length > 300 && "..."}
+                              </pre>
                             </div>
                           )}
-
-                          {/* Gemini config */}
-                          {parsedConfig.type === "gemini" &&
-                            parsedConfig.env && (
-                              <div className="space-y-1.5">
-                                {Object.entries(parsedConfig.env).map(
-                                  ([key, value]) => (
-                                    <div
-                                      key={key}
-                                      className="grid grid-cols-2 gap-2 text-xs"
-                                    >
-                                      <span className="font-mono text-muted-foreground truncate">
-                                        {key}
-                                      </span>
-                                      <span className="font-mono truncate">
-                                        {maskValue(key, String(value))}
-                                      </span>
-                                    </div>
-                                  ),
-                                )}
-                              </div>
-                            )}
                         </div>
                       )}
 
@@ -660,9 +544,7 @@ export function DeepLinkImportDialog() {
                               })}
                             </div>
                             <div className="col-span-2 text-sm font-mono text-muted-foreground">
-                              {request.usageApiKey.length > 4
-                                ? `${request.usageApiKey.substring(0, 4)}${"*".repeat(12)}`
-                                : "****"}
+                              {maskSecret(request.usageApiKey)}
                             </div>
                           </div>
                         )}

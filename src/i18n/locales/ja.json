@@ -427,8 +427,8 @@
           "error": "重大なエラーのみ",
           "warn": "エラー + 警告",
           "info": "一般的な操作情報（デフォルト）",
-          "debug": "SSE ストリームとリクエスト/レスポンスを含む詳細情報",
-          "trace": "すべてのログ、最も詳細"
+          "debug": "詳細な診断情報（バイト数、ステータス、ルーティング。リクエスト/レスポンス内容は含まない）",
+          "trace": "すべてのログ。リクエスト/レスポンス/SSE の全文を含む — 機密性の高い会話内容が含まれる可能性あり"
         }
       }
     },
@@ -695,6 +695,8 @@
     "preserveCodexOfficialAuthOnSwitchDescription": "ローカルルーティングが無効な場合のサードパーティ切替を制御します。ルーティング接管中は常に Codex の公式ログインを保持します。",
     "unifyCodexSessionHistory": "Codex セッション履歴を統一",
     "unifyCodexSessionHistoryDescription": "オンにすると、公式サブスクリプションも共有の custom プロバイダー ID で動作し、公式とサードパーティのセッションが同じ履歴リストに表示されます。既存の公式セッションの移行も選択できます（移行前に自動バックアップ）。オフにする際はバックアップから復元できます。注意：プロバイダーをまたいで古いセッションを再開すると、encrypted_content の推論内容を相手のバックエンドが復号できず、再開に失敗する場合があります。",
+    "codexDefaultRequiresOpenaiAuth": "新規 Codex 設定に requires_openai_auth を含める",
+    "codexDefaultRequiresOpenaiAuthDescription": "オン（既定）の場合、新しく生成されるサードパーティ Codex 設定に requires_openai_auth = true が含まれ、Codex は auth.json の API キーをカスタムプロバイダーに送信します。警告：オフにすると、env_key を設定しない限り Codex は auth.json の API キーをカスタムプロバイダーに送信しません——接管なしの直接リクエストは資格情報なしで送られます。ローカルプロキシ接管には影響しません。新規生成される設定（プリセット、カスタムテンプレート、統一プロバイダー同期、ディープリンク取り込み）のみが対象で、保存済みプロバイダーの TOML は変更されず、プロバイダーごとに編集できます。セッション履歴統一と公式接管の注入では常にこのフィールドが保持されます。",
     "unifyCodexHistoryRestoreCompleted": "バックアップから公式セッション履歴を復元しました（セッションファイル {{files}} 件、インデックス {{rows}} 行）",
     "unifyCodexHistoryRestoreFailed": "公式セッション履歴の復元に失敗しました。もう一度お試しください",
     "unifyCodexHistoryRestoreNothing": "現在の Codex ディレクトリに復元可能な移行バックアップはありません",

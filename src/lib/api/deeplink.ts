@@ -1,13 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AppId } from "./types";
 
 export type ResourceType = "provider" | "prompt" | "mcp" | "skill";
+
+/**
+ * Apps accepted by the backend deeplink parser (src-tauri/src/deeplink/parser.rs):
+ * claude | codex | gemini | grokbuild | opencode | openclaw | hermes.
+ * Note: `claude-desktop` exists as an AppId but is rejected by the deeplink parser.
+ */
+export type DeepLinkAppId = Exclude<AppId, "claude-desktop">;
 
 export interface DeepLinkImportRequest {
   version: string;
   resource: ResourceType;
 
   // Common fields
-  app?: "claude" | "codex" | "gemini";
+  app?: DeepLinkAppId;
   name?: string;
   enabled?: boolean;
 
@@ -27,7 +35,9 @@ export interface DeepLinkImportRequest {
   description?: string;
 
   // MCP fields
-  apps?: string; // "claude,codex,gemini"
+  // Comma-separated list, e.g. "claude,codex,gemini,grokbuild,opencode,openclaw,hermes"
+  // (backend also accepts the alias "grok" for grokbuild)
+  apps?: string;
 
   // Skill fields
   repo?: string;

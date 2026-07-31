@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement } from "react";
 import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
 import type { ProviderFormValues } from "@/components/providers/forms/ProviderForm";
 
@@ -25,6 +27,18 @@ vi.mock("@/components/ui/dialog", () => ({
 }));
 
 let mockFormValues: ProviderFormValues;
+
+// AddProviderDialog 内嵌的 UniversalProviderFormModal 会调用
+// useProvidersQuery / useSettingsQuery，需要 QueryClient 上下文。
+function renderWithQueryClient(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+  );
+}
 
 vi.mock("@/components/providers/forms/ProviderForm", () => ({
   ProviderForm: ({
@@ -63,7 +77,7 @@ describe("AddProviderDialog", () => {
     const handleSubmit = vi.fn().mockResolvedValue(undefined);
     const handleOpenChange = vi.fn();
 
-    render(
+    renderWithQueryClient(
       <AddProviderDialog
         open
         onOpenChange={handleOpenChange}
@@ -99,7 +113,7 @@ describe("AddProviderDialog", () => {
       }),
     };
 
-    render(
+    renderWithQueryClient(
       <AddProviderDialog
         open
         onOpenChange={vi.fn()}
@@ -149,7 +163,7 @@ context_window = 500000
       }),
     };
 
-    render(
+    renderWithQueryClient(
       <AddProviderDialog
         open
         onOpenChange={vi.fn()}

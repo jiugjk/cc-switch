@@ -97,7 +97,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 
 - **Cloud sync** — Custom config directory (Dropbox, OneDrive, iCloud, NAS) and WebDAV server sync
 - **Deep Link** (`ccswitch://`) — Import providers, MCP servers, prompts, and skills via URL
-- Dark / Light / System theme, auto-launch, auto-updater, atomic writes, auto-backups, i18n (zh/zh-TW/en/ja)
+- Dark / Light / System theme, auto-launch, atomic writes, auto-backups, i18n (zh/zh-TW/en/ja)
 
 ## FAQ
 
@@ -209,7 +209,7 @@ Download the latest release from the [Releases](../../releases) page. Assets typ
 
 > **Notes**
 > - Builds are **unsigned** — Windows SmartScreen may warn; choose "Run anyway".
-> - No fork auto-update channel (`createUpdaterArtifacts` is disabled; no signing key).
+> - No fork auto-update channel — the in-app updater is removed (`createUpdaterArtifacts` is false, no `plugins.updater` config, no signing key). "Check for Updates" opens this fork's releases page for manual download.
 > - Tags look like `v3.17.0-fork.<run_number>` and point at the commit that was built.
 
 <details>
@@ -342,7 +342,7 @@ pnpm test:unit --coverage
 
 **Frontend**: React 18 · TypeScript · Vite · TailwindCSS 3.4 · TanStack Query v5 · react-i18next · react-hook-form · zod · shadcn/ui · @dnd-kit
 
-**Backend**: Tauri 2.8 · Rust · serde · tokio · thiserror · tauri-plugin-updater/process/dialog/store/log
+**Backend**: Tauri 2.8 · Rust · serde · tokio · thiserror · tauri-plugin-process/dialog/store/log
 
 **Testing**: vitest · MSW · @testing-library/react
 

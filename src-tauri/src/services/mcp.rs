@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
-use crate::app_config::{AppType, McpServer};
+use crate::app_config::{AppType, McpApps, McpServer};
 use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
@@ -240,6 +240,94 @@ impl McpService {
         }
 
         Ok(())
+    }
+
+    /// 整体重写 Codex / Grok Build 的 live config.toml 之前，把用户直接在
+    /// live `[mcp_servers.*]` 里手工编辑的条目回填进 DB（MCP SSOT）。
+    ///
+    /// 背景：这两个应用的 MCP 与 live 同文件，且 live 写入是整文件替换 +
+    /// 从 DB 重投影（见 provider 切换/保存路径）。若不先回填，用户在 live
+    /// 里改过的 command/cwd 等会被 DB 里的陈旧规范写回（如 node_repl 换了
+    /// 安装目录后每次切换都被打回旧路径）。
+    ///
+    /// 规则：
+    /// - 仅 Codex / GrokBuild；其余应用直接返回 0（它们的 MCP 文件不随
+    ///   live 重写被清空）。
+    /// - live 与 DB 都有且该应用已启用：经有损投影归一化后比较（中和
+    ///   headers/http_headers 命名、双向转换丢弃的复杂字段等 round-trip
+    ///   差异），不同则以 live 为准更新规范；apps 标志、名称、标签等
+    ///   元数据保持不变。
+    /// - live 独有的 id：按导入语义新建仅启用该应用的行，避免用户手工
+    ///   添加的服务器被整文件重写静默清掉。
+    /// - live 缺失的 id：不动。缺失有歧义（重写与重投影之间崩溃时
+    ///   [mcp_servers] 合法地为空），绝不据此禁用或删除。
+    /// - 单条失败（校验/保存）跳过并告警，不阻断其余条目；调用方须
+    ///   warn-degrade，绝不让回填失败中断切换/保存。
+    ///
+    /// 返回发生变更（更新或新建）的行数。
+    pub fn backfill_live_edits_for_app(state: &AppState, app: &AppType) -> Result<usize, AppError> {
+        type SpecsEquivalent = fn(&serde_json::Value, &serde_json::Value) -> bool;
+        let (live_specs, specs_equivalent): (HashMap<String, serde_json::Value>, SpecsEquivalent) =
+            match app {
+                AppType::Codex => (
+                    mcp::collect_live_codex_server_specs()?,
+                    mcp::codex_specs_equivalent,
+                ),
+                AppType::GrokBuild => (
+                    mcp::collect_live_grokbuild_server_specs()?,
+                    mcp::grokbuild_specs_equivalent,
+                ),
+                _ => return Ok(0),
+            };
+        if live_specs.is_empty() {
+            return Ok(0);
+        }
+
+        let mut servers = state.db.get_all_mcp_servers()?;
+        let mut changed = 0usize;
+        for (id, live_spec) in live_specs {
+            if let Some(existing) = servers.get_mut(&id) {
+                if !existing.apps.is_enabled_for(app) {
+                    // 未对该应用启用的行不吸收 live 内容：重投影本就会把该
+                    // 条目从 live 移除，回填反而会让它复活。
+                    continue;
+                }
+                if specs_equivalent(&existing.server, &live_spec) {
+                    continue;
+                }
+                existing.server = live_spec;
+                if let Err(err) = state.db.save_mcp_server(existing) {
+                    log::warn!("回填 live MCP 编辑到 '{id}' 失败: {err}");
+                    continue;
+                }
+                log::info!("已把 live 中编辑过的 MCP 服务器 '{id}' 回填进 DB（live 优先）");
+                changed += 1;
+            } else {
+                // live 独有：视作用户手工添加，按导入语义入库（仅启用当前应用）。
+                // 注意：若在 CC Switch 内删除服务器时 live 移除曾静默失败，这里
+                // 会把它重新导入——留日志便于排查。
+                let mut apps = McpApps::default();
+                apps.set_enabled_for(app, true);
+                let server = McpServer {
+                    id: id.clone(),
+                    name: id.clone(),
+                    server: live_spec,
+                    apps,
+                    description: None,
+                    homepage: None,
+                    docs: None,
+                    tags: Vec::new(),
+                };
+                if let Err(err) = state.db.save_mcp_server(&server) {
+                    log::warn!("回填 live 新增 MCP 服务器 '{id}' 入库失败: {err}");
+                    continue;
+                }
+                log::info!("live 中发现未知 MCP 服务器 '{id}'，已按导入语义入库（仅启用 {app:?}）");
+                servers.insert(id, server);
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 
     // ========================================================================

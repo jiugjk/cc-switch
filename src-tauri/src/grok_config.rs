@@ -269,6 +269,10 @@ pub fn base_url_matches(config_toml: &str, predicate: impl FnOnce(&str) -> bool)
 
 /// Remove MCP projections from a provider-owned Grok Build settings snapshot.
 /// MCP servers are owned by the database and projected into live config.toml.
+/// The strip is lossless for user data: switch/save paths run
+/// `McpService::backfill_live_edits_for_app` before rewriting live, so manual
+/// `[mcp_servers.*]` edits are absorbed into the DB first; this only prevents
+/// deleted servers from resurrecting via the provider snapshot.
 pub fn strip_grok_mcp_servers_from_settings(settings: &mut Value) -> Result<(), AppError> {
     let Some(config_text) = settings
         .get("config")

@@ -224,7 +224,7 @@ pub async fn handle_non_streaming(
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     strip_hop_by_hop_response_headers(&mut response_headers);
 
-    log::debug!(
+    log::trace!(
         "[{}] 上游响应体内容: {}",
         ctx.tag,
         String::from_utf8_lossy(&body_bytes)
@@ -688,7 +688,7 @@ pub fn create_logged_passthrough_stream(
         let mut collector = usage_collector;
         let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
         let inspect_sse_events =
-            collector.is_some() || log::log_enabled!(log::Level::Debug);
+            collector.is_some() || log::log_enabled!(log::Level::Trace);
         let mut is_first_chunk = true;
 
         // 超时配置
@@ -762,12 +762,12 @@ pub fn create_logged_passthrough_stream(
                                                 _ => false,
                                             };
                                             if collected {
-                                                log::debug!("[{tag}] <<< SSE 事件: {data}");
+                                                log::trace!("[{tag}] <<< SSE 事件: {data}");
                                             } else {
-                                                log::debug!("[{tag}] <<< SSE 数据: {data}");
+                                                log::trace!("[{tag}] <<< SSE 数据: {data}");
                                             }
                                         } else {
-                                            log::debug!("[{tag}] <<< SSE: [DONE]");
+                                            log::trace!("[{tag}] <<< SSE: [DONE]");
                                         }
                                     }
                                 }

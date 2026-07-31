@@ -1232,8 +1232,8 @@ impl RequestForwarder {
                 if dynamic_endpoint != base_url {
                     log::debug!(
                         "[Copilot] 使用动态 API endpoint: {} (原: {})",
-                        dynamic_endpoint,
-                        base_url
+                        super::http_client::sanitize_url_for_log(&dynamic_endpoint),
+                        super::http_client::sanitize_url_for_log(&base_url)
                     );
                     base_url = dynamic_endpoint;
                 }
@@ -1999,10 +1999,13 @@ impl RequestForwarder {
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("<none>");
-        log::info!("[{tag}] >>> 请求 URL: {url} (model={request_model})");
-        if log::log_enabled!(log::Level::Debug) {
+        log::info!(
+            "[{tag}] >>> 请求 URL: {} (model={request_model})",
+            super::http_client::sanitize_url_for_log(&url)
+        );
+        if log::log_enabled!(log::Level::Trace) {
             if let Ok(body_str) = serde_json::to_string(&filtered_body) {
-                log::debug!(
+                log::trace!(
                     "[{tag}] >>> 请求体内容 ({}字节): {}",
                     body_str.len(),
                     body_str
@@ -4491,6 +4494,30 @@ mod tests {
         );
 
         assert_eq!(url, "https://relay.example/custom/generate-content?alt=sse");
+    }
+
+    #[test]
+    fn request_url_log_sanitizer_masks_gemini_key_from_resolved_url() {
+        // 回归：forward 请求日志（原样打印 url 的调用点）必须经过
+        // sanitize_url_for_log，客户端透传的 ?key=AIza... 不得落盘
+        let url = crate::proxy::gemini_url::resolve_gemini_native_url(
+            "https://generativelanguage.googleapis.com",
+            "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=AIzaSyExampleSecret",
+            false,
+        );
+        assert!(
+            url.contains("AIza"),
+            "前置条件：解析后的 URL 应包含明文 key"
+        );
+
+        let sanitized = crate::proxy::http_client::sanitize_url_for_log(&url);
+        assert!(
+            !sanitized.contains("AIza"),
+            "sanitized URL 不应包含 key 明文: {sanitized}"
+        );
+        assert!(sanitized.contains("gemini-2.5-flash:streamGenerateContent"));
+        assert!(sanitized.contains("alt=sse"));
+        assert!(sanitized.contains("key=***"));
     }
 
     #[test]

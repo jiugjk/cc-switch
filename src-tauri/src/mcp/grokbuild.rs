@@ -4,6 +4,7 @@
 //! stored alongside its model configuration in `~/.grok/config.toml`.
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::app_config::{McpApps, McpServer, MultiAppConfig};
 use crate::error::AppError;
@@ -75,33 +76,79 @@ fn toml_server_to_json(entry: &toml::value::Table) -> Value {
     Value::Object(spec)
 }
 
-pub fn import_from_grokbuild(config: &mut MultiAppConfig) -> Result<usize, AppError> {
+/// 读取 live `~/.grok/config.toml` 中 `[mcp_servers]` 的全部服务器定义，
+/// 返回 id -> JSON 规范（Grok 方言：无显式 type、统一 `headers` 命名）。
+///
+/// 文件缺失或为空时返回空表；未通过基础校验的条目跳过并告警（与导入
+/// 语义一致）。导入流程与切换/保存前的 live -> DB 回填共用本函数。
+pub fn collect_live_grokbuild_server_specs() -> Result<HashMap<String, Value>, AppError> {
     let text = read_config_text()?;
     if text.trim().is_empty() {
-        return Ok(0);
+        return Ok(HashMap::new());
     }
     let root: toml::Table = toml::from_str(&text)
         .map_err(|e| AppError::McpValidation(format!("解析 ~/.grok/config.toml 失败: {e}")))?;
-    let Some(entries) = root.get("mcp_servers").and_then(toml::Value::as_table) else {
-        return Ok(0);
-    };
 
-    let servers = config
-        .mcp
-        .servers
-        .get_or_insert_with(std::collections::HashMap::new);
-    let mut changed = 0;
-    for (id, entry) in entries {
-        let Some(entry) = entry.as_table() else {
-            continue;
-        };
-        let spec = toml_server_to_json(entry);
-        if let Err(error) = validate_server_spec(&spec) {
-            log::warn!("跳过无效 Grok Build MCP 项 '{id}': {error}");
-            continue;
+    let mut specs = HashMap::new();
+    if let Some(entries) = root.get("mcp_servers").and_then(toml::Value::as_table) {
+        for (id, entry) in entries {
+            let Some(entry) = entry.as_table() else {
+                continue;
+            };
+            let spec = toml_server_to_json(entry);
+            if let Err(error) = validate_server_spec(&spec) {
+                log::warn!("跳过无效 Grok Build MCP 项 '{id}': {error}");
+                continue;
+            }
+            specs.insert(id.clone(), spec);
         }
+    }
+    Ok(specs)
+}
 
-        if let Some(existing) = servers.get_mut(id) {
+/// 把 JSON 服务器规范经「渲染成 Grok Build TOML → 重新解析 → 导入方向转换」
+/// 做一次有损归一化。Grok 方言与 Codex 不同（无显式 type、`headers` 而非
+/// `http_headers`，导入方向是深转换），归一化必须走 Grok 自己的渲染器/解析器。
+fn canonicalize_grokbuild_spec_for_compare(spec: &Value) -> Result<Value, AppError> {
+    let table = json_server_to_grokbuild_toml_table(spec)?;
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["server"] = toml_edit::Item::Table(table);
+    let root: toml::Table = toml::from_str(&doc.to_string())
+        .map_err(|e| AppError::McpValidation(format!("MCP 规范归一化失败: {e}")))?;
+    let entry = root
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| AppError::McpValidation("MCP 规范归一化失败: 缺少条目".into()))?;
+    Ok(toml_server_to_json(entry))
+}
+
+/// 判断 DB 存储规范与 live 派生规范在经过 Grok Build TOML 投影后是否等价。
+///
+/// 用于切换/保存前的 live -> DB 回填：round-trip 丢失的字段不算差异。
+/// 归一化失败时保守返回 true（视为等价、不回填）。
+pub fn grokbuild_specs_equivalent(db_spec: &Value, live_spec: &Value) -> bool {
+    match (
+        canonicalize_grokbuild_spec_for_compare(db_spec),
+        canonicalize_grokbuild_spec_for_compare(live_spec),
+    ) {
+        (Ok(db_canonical), Ok(live_canonical)) => db_canonical == live_canonical,
+        (Err(err), _) | (_, Err(err)) => {
+            log::warn!("MCP 规范归一化失败，保守视为未修改: {err}");
+            true
+        }
+    }
+}
+
+pub fn import_from_grokbuild(config: &mut MultiAppConfig) -> Result<usize, AppError> {
+    let live_specs = collect_live_grokbuild_server_specs()?;
+    if live_specs.is_empty() {
+        return Ok(0);
+    }
+
+    let servers = config.mcp.servers.get_or_insert_with(HashMap::new);
+    let mut changed = 0;
+    for (id, spec) in live_specs {
+        if let Some(existing) = servers.get_mut(&id) {
             if !existing.apps.grokbuild {
                 existing.apps.grokbuild = true;
                 changed += 1;
@@ -217,5 +264,76 @@ http_headers = { Authorization = "Bearer token" }
                 .and_then(toml_edit::Item::as_str),
             Some("Bearer token")
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn collect_live_grokbuild_server_specs_parses_entries_and_skips_invalid() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+
+        // 无 ~/.grok/config.toml：返回空表而非报错
+        let empty = collect_live_grokbuild_server_specs().expect("collect with no config");
+        assert!(empty.is_empty());
+
+        let grok_dir = temp.path().join(".grok");
+        std::fs::create_dir_all(&grok_dir).expect("create .grok dir");
+        std::fs::write(
+            grok_dir.join("config.toml"),
+            r#"[mcp_servers.node_repl]
+command = "node"
+cwd = "/opt/new-install"
+
+[mcp_servers.remote]
+url = "https://mcp.example"
+
+[mcp_servers.remote.headers]
+Authorization = "Bearer token"
+
+[mcp_servers.bad]
+command = ""
+"#,
+        )
+        .expect("write grok config.toml");
+
+        let specs = collect_live_grokbuild_server_specs();
+
+        match original_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+
+        let specs = specs.expect("collect specs");
+        assert_eq!(specs.len(), 2, "invalid entry must be skipped");
+        assert_eq!(specs["node_repl"]["type"], "stdio");
+        assert_eq!(specs["node_repl"]["cwd"], "/opt/new-install");
+        assert_eq!(specs["remote"]["type"], "http");
+        assert_eq!(specs["remote"]["headers"]["Authorization"], "Bearer token");
+    }
+
+    #[test]
+    fn grokbuild_specs_equivalent_neutralizes_dialect_round_trip() {
+        // DB 规范带显式 type + 投影方向会丢弃的复杂字段；live 派生规范由
+        // Grok 方言（无 type）推断而来——两者必须判等。
+        let db_spec = json!({
+            "type": "http",
+            "url": "https://mcp.example",
+            "headers": { "Authorization": "Bearer token" },
+            "nested": { "count": 1 }
+        });
+        let live_spec = json!({
+            "type": "http",
+            "url": "https://mcp.example",
+            "headers": { "Authorization": "Bearer token" }
+        });
+        assert!(grokbuild_specs_equivalent(&db_spec, &live_spec));
+    }
+
+    #[test]
+    fn grokbuild_specs_equivalent_detects_real_edits() {
+        let db_spec = json!({ "type": "stdio", "command": "node", "cwd": "/opt/old" });
+        let live_spec = json!({ "type": "stdio", "command": "node", "cwd": "/opt/new" });
+        assert!(!grokbuild_specs_equivalent(&db_spec, &live_spec));
     }
 }

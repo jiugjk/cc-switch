@@ -172,7 +172,7 @@ Codex reads the model catalog at startup. Even if CC Switch has generated a new 
 
 ### Turning the switch off returns to the old behavior
 
-If `Keep official login when switching third-party providers` is turned off, third-party provider switching uses the compatibility behavior from older versions and may write `auth.json` again. If your goal is to keep official remote control and official plugins long term, keep this switch enabled.
+If `Keep official login when switching third-party providers` is turned off, third-party provider switching uses the compatibility behavior from older versions and may write `auth.json` again. If your goal is to keep official remote control and official plugins long term, keep this switch enabled. One safety net applies even with the switch off: when the provider being switched in stores ChatGPT OAuth tokens for the same account (rather than a third-party API key), CC Switch never downgrades a fresher live login — the `auth.json` tokens with the newer `last_refresh` are kept. API-key providers keep the overwrite behavior described above.
 
 ## FAQ
 

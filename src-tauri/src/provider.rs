@@ -753,6 +753,23 @@ pub struct UniversalProvider {
     pub sort_index: Option<usize>,
 }
 
+/// Codex/OpenAI 的 base_url 既可能是纯 origin（需要补 /v1），也可能包含
+/// 自定义前缀（不应强行补版本）。生成与字段级补丁路径共用该归一化。
+pub(crate) fn normalize_codex_base_url(base_url: &str) -> String {
+    let base_trimmed = base_url.trim_end_matches('/');
+    let origin_only = match base_trimmed.split_once("://") {
+        Some((_scheme, rest)) => !rest.contains('/'),
+        None => !base_trimmed.contains('/'),
+    };
+    if base_trimmed.ends_with("/v1") {
+        base_trimmed.to_string()
+    } else if origin_only {
+        format!("{base_trimmed}/v1")
+    } else {
+        base_trimmed.to_string()
+    }
+}
+
 impl UniversalProvider {
     /// 创建新的统一供应商
     pub fn new(
@@ -827,35 +844,48 @@ impl UniversalProvider {
         })
     }
 
+    /// Codex 生成/补丁共用的模型取值（sync_universal_to_apps 的字段级补丁
+    /// 路径必须与 to_codex_provider 的整体生成保持一致）
+    pub(crate) fn codex_model(&self) -> String {
+        self.models
+            .codex
+            .as_ref()
+            .and_then(|m| m.model.clone())
+            .unwrap_or_else(|| "gpt-4o".to_string())
+    }
+
+    /// Codex 生成/补丁共用的 reasoning_effort 取值
+    pub(crate) fn codex_reasoning_effort(&self) -> String {
+        self.models
+            .codex
+            .as_ref()
+            .and_then(|m| m.reasoning_effort.clone())
+            .unwrap_or_else(|| "high".to_string())
+    }
+
+    /// Codex 生成/补丁共用的 base_url 取值（含 /v1 归一化）
+    pub(crate) fn codex_base_url(&self) -> String {
+        normalize_codex_base_url(&self.base_url)
+    }
+
     /// 生成 Codex 供应商配置
     pub fn to_codex_provider(&self) -> Option<Provider> {
         if !self.apps.codex {
             return None;
         }
 
-        let models = self.models.codex.as_ref();
-        let model = models
-            .and_then(|m| m.model.clone())
-            .unwrap_or_else(|| "gpt-4o".to_string());
-        let reasoning_effort = models
-            .and_then(|m| m.reasoning_effort.clone())
-            .unwrap_or_else(|| "high".to_string());
+        let model = self.codex_model();
+        let reasoning_effort = self.codex_reasoning_effort();
+        let codex_base_url = self.codex_base_url();
 
-        // Codex/OpenAI 的 base_url 既可能是纯 origin（需要补 /v1），也可能包含自定义前缀（不应强行补版本）
-        let base_trimmed = self.base_url.trim_end_matches('/');
-        let origin_only = match base_trimmed.split_once("://") {
-            Some((_scheme, rest)) => !rest.contains('/'),
-            None => !base_trimmed.contains('/'),
-        };
-        let codex_base_url = if base_trimmed.ends_with("/v1") {
-            base_trimmed.to_string()
-        } else if origin_only {
-            format!("{base_trimmed}/v1")
+        // 生成 Codex 的 config.toml 内容。
+        // requires_openai_auth 仅按设置的生成默认值决定是否写入；
+        // 已保存供应商的存量 TOML 不受影响（sync 走字段级补丁路径）。
+        let requires_openai_auth_line = if crate::settings::codex_default_requires_openai_auth() {
+            "\nrequires_openai_auth = true"
         } else {
-            base_trimmed.to_string()
+            ""
         };
-
-        // 生成 Codex 的 config.toml 内容
         let config_toml = format!(
             r#"model_provider = "custom"
 model = "{model}"
@@ -865,8 +895,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = "NewAPI"
 base_url = "{codex_base_url}"
-wire_api = "responses"
-requires_openai_auth = true"#
+wire_api = "responses"{requires_openai_auth_line}"#
         );
 
         let settings_config = serde_json::json!({
@@ -1328,6 +1357,41 @@ mod tests {
         );
 
         assert!(universal.to_codex_provider().is_none());
+    }
+
+    // 生成结果依赖全局设置：显式钉住设置值（serial + AmbientSettings），
+    // 避免受同进程其它测试遗留的 settings 状态影响。
+    #[test]
+    #[serial_test::serial]
+    fn universal_provider_to_codex_provider_requires_openai_auth_follows_setting() {
+        let mut universal = UniversalProvider::new(
+            "u1".to_string(),
+            "Universal".to_string(),
+            "newapi".to_string(),
+            "https://api.example.com".to_string(),
+            "api-key".to_string(),
+        );
+        universal.apps.codex = true;
+
+        let config_with_setting = |settings_json: &str| {
+            let _settings = crate::settings::test_support::AmbientSettings::pin(settings_json);
+            let provider = universal.to_codex_provider().expect("codex provider");
+            provider
+                .settings_config
+                .get("config")
+                .and_then(|item| item.as_str())
+                .expect("config toml")
+                .to_string()
+        };
+
+        let config_on = config_with_setting(r#"{"codexDefaultRequiresOpenaiAuth": true}"#);
+        assert!(config_on.contains("requires_openai_auth = true"));
+
+        let config_off = config_with_setting(r#"{"codexDefaultRequiresOpenaiAuth": false}"#);
+        assert!(!config_off.contains("requires_openai_auth"));
+        // 其余生成内容不受该设置影响
+        assert!(config_off.contains("base_url = \"https://api.example.com/v1\""));
+        assert!(config_off.contains("wire_api = \"responses\""));
     }
 
     #[test]

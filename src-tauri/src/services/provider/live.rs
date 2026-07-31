@@ -866,6 +866,9 @@ fn restore_live_settings_for_provider_backfill(
 
     // MCP 服务器归 DB mcp_servers 表所有，live 里的 [mcp_servers] 是同步投影；
     // 回填时剥掉，否则已删除的服务器会随供应商快照复活（逐条 reconcile 清不掉孤儿）。
+    // 剥离是安全的：切换/保存在重写 live 前已先经
+    // McpService::backfill_live_edits_for_app 把 live 里的 MCP 手工编辑吸收进
+    // DB，此处只负责防止孤儿随快照复活。
     if let Err(err) = crate::codex_config::strip_codex_mcp_servers_from_settings(&mut settings) {
         log::warn!(
             "Failed to strip mcp_servers while backfilling '{}': {err}",
@@ -1214,6 +1217,24 @@ pub(crate) fn sync_current_provider_for_app_to_live(
 
         let providers = state.db.get_all_providers(app_type.as_str())?;
         if let Some(provider) = providers.get(&current_id) {
+            // 整体重写 live 前先把 Codex / Grok Build 用户在 [mcp_servers] 里的
+            // 手工编辑回填进 DB（warn-degrade）。接管期间 live 是代理占位内容，
+            // 绝不回填（与 switch 的接管早退语义一致；本函数自身不做接管检查，
+            // 因此这里必须显式探测）。
+            // 注：sync_current_to_live（配置导入 / 云同步恢复）走
+            // sync_current_provider_for_app_respecting_takeover，刻意不做该回填：
+            // 恢复场景下 live 可能来自另一台机器或早已过期，回填会让恢复数据
+            // 中已删除的服务器复活。残留缺口：恢复路径仍会覆盖 live 的 MCP
+            // 手工编辑。
+            if matches!(app_type, AppType::Codex | AppType::GrokBuild)
+                && !state
+                    .proxy_service
+                    .detect_takeover_in_live_config_for_app(app_type)
+            {
+                if let Err(err) = McpService::backfill_live_edits_for_app(state, app_type) {
+                    log::warn!("同步到 live 前回填 {app_type:?} 的 MCP 编辑失败: {err}");
+                }
+            }
             write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
         }
     }

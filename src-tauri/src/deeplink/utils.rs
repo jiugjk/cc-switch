@@ -6,6 +6,53 @@ use crate::error::AppError;
 use base64::prelude::*;
 use url::Url;
 
+/// Redact a deep link URL for logging
+///
+/// Deep link URLs carry secrets as query params (apiKey, usageApiKey,
+/// usageAccessToken, base64 `config` blobs). This keeps scheme/host/path and
+/// replaces the query string with the sorted list of parameter names so logs
+/// stay debuggable without leaking secret values.
+pub fn redact_url_for_log(url_str: &str) -> String {
+    match Url::parse(url_str) {
+        Ok(url) => {
+            let mut output = format!("{}://", url.scheme());
+            if let Some(host) = url.host_str() {
+                output.push_str(host);
+            }
+            output.push_str(url.path());
+
+            let mut keys: Vec<String> = url.query_pairs().map(|(k, _)| k.to_string()).collect();
+            keys.sort();
+            keys.dedup();
+
+            if !keys.is_empty() {
+                output.push_str("?[keys:");
+                output.push_str(&keys.join(","));
+                output.push(']');
+            }
+
+            output
+        }
+        Err(_) => {
+            let base = url_str.split('#').next().unwrap_or(url_str);
+            match base.split_once('?') {
+                Some((prefix, _)) => format!("{prefix}?[redacted]"),
+                None => base.to_string(),
+            }
+        }
+    }
+}
+
+/// Build the payload for `deeplink-error` events
+///
+/// The URL is always redacted so secrets never reach the webview / devtools.
+pub fn deeplink_error_payload(url_str: &str, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "url": redact_url_for_log(url_str),
+        "error": error
+    })
+}
+
 /// Validate that a string is a valid HTTP(S) URL
 pub fn validate_url(url_str: &str, field_name: &str) -> Result<(), AppError> {
     let url = Url::parse(url_str)

@@ -427,8 +427,8 @@
           "error": "Critical errors only",
           "warn": "Errors + warnings",
           "info": "General operation info (default)",
-          "debug": "Detailed info including SSE stream and request/response",
-          "trace": "All logs, most verbose"
+          "debug": "Detailed diagnostics (sizes, statuses, routing; no request/response content)",
+          "trace": "All logs incl. full request/response/SSE bodies — may contain sensitive conversation content"
         }
       }
     },
@@ -695,6 +695,8 @@
     "preserveCodexOfficialAuthOnSwitchDescription": "Controls third-party switches when local routing is off. Takeover routing always preserves the Codex official login.",
     "unifyCodexSessionHistory": "Unified Codex session history",
     "unifyCodexSessionHistoryDescription": "When enabled, the official subscription runs under the shared \"custom\" provider id so official and third-party sessions appear in one history list, optionally migrating existing official sessions in (backed up first). When turning it off, the migrated sessions can be restored from backup. Note: resuming an old session across providers may fail because its encrypted_content reasoning can only be decrypted by the backend that created it.",
+    "codexDefaultRequiresOpenaiAuth": "Include requires_openai_auth in new Codex configs",
+    "codexDefaultRequiresOpenaiAuthDescription": "When on (default), newly generated third-party Codex configs include requires_openai_auth = true so Codex sends the auth.json API key to the custom provider. Warning: when off, Codex will NOT send the auth.json API key to custom providers unless env_key is configured — direct (non-takeover) requests then go out without a credential; local proxy takeover is unaffected. Only affects newly generated configs (presets, custom template, universal sync, deeplink import); saved providers keep their TOML and stay editable per provider. The unified-session-history and official takeover injections always keep the field.",
     "unifyCodexHistoryRestoreCompleted": "Official session history restored from backup ({{files}} session files, {{rows}} index rows)",
     "unifyCodexHistoryRestoreFailed": "Failed to restore official session history, please try again",
     "unifyCodexHistoryRestoreNothing": "No restorable migration backup for the current Codex directory",

@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use cc_switch_lib::{import_provider_from_deeplink, parse_deeplink_url, AppState, Database};
+use cc_switch_lib::{
+    deeplink_error_payload, import_provider_from_deeplink, parse_deeplink_url, redact_url_for_log,
+    AppState, Database,
+};
 
 #[path = "support.rs"]
 mod support;
@@ -83,4 +86,71 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
         config_text.contains("model = \"gpt-4o\""),
         "config.toml content should contain model setting"
     );
+}
+
+#[test]
+fn deeplink_redaction_never_exposes_secrets() {
+    // Query values carry secrets: apiKey / usageApiKey / usageAccessToken /
+    // base64 config blob ("Y2ZnLXNlbnRpbmVs" == "cfg-sentinel").
+    let url = "ccswitch://v1/import?resource=provider&app=claude&apiKey=sk-sentinel-123&usageApiKey=uk-sentinel-456&usageAccessToken=uat-sentinel-789&config=Y2ZnLXNlbnRpbmVs";
+
+    let redacted = redact_url_for_log(url);
+
+    // Secret values must never appear in the redacted form.
+    assert!(
+        !redacted.contains("sk-sentinel-123"),
+        "redacted: {redacted}"
+    );
+    assert!(
+        !redacted.contains("uk-sentinel-456"),
+        "redacted: {redacted}"
+    );
+    assert!(
+        !redacted.contains("uat-sentinel-789"),
+        "redacted: {redacted}"
+    );
+    assert!(
+        !redacted.contains("Y2ZnLXNlbnRpbmVs"),
+        "redacted: {redacted}"
+    );
+
+    // Scheme/host/path and the sorted query-key list stay for debugging.
+    assert!(
+        redacted.starts_with("ccswitch://v1/import"),
+        "redacted: {redacted}"
+    );
+    assert!(redacted.contains("?[keys:"), "redacted: {redacted}");
+    assert!(redacted.contains("apiKey"), "redacted: {redacted}");
+    assert!(
+        redacted.contains("usageAccessToken"),
+        "redacted: {redacted}"
+    );
+}
+
+#[test]
+fn deeplink_error_payload_carries_redacted_url() {
+    // Parseable URL -> Ok branch of the redactor ("?[keys:...]" form).
+    let url = "ccswitch://v1/import?resource=bogus&apiKey=sk-sentinel-123";
+    let payload = deeplink_error_payload(url, "unsupported resource");
+    let payload_url = payload["url"].as_str().expect("url field");
+    assert!(
+        !payload_url.contains("sk-sentinel-123"),
+        "payload url: {payload_url}"
+    );
+    assert!(
+        payload_url.contains("?[keys:"),
+        "payload url: {payload_url}"
+    );
+    assert_eq!(payload["error"].as_str(), Some("unsupported resource"));
+
+    // Unparseable URL (no scheme) -> Err branch ("?[redacted]" form).
+    let bad_url = "no scheme here?apiKey=sk-sentinel-123";
+    let payload = deeplink_error_payload(bad_url, "invalid url");
+    let payload_url = payload["url"].as_str().expect("url field");
+    assert!(
+        !payload_url.contains("sk-sentinel-123"),
+        "payload url: {payload_url}"
+    );
+    assert_eq!(payload_url, "no scheme here?[redacted]");
+    assert_eq!(payload["error"].as_str(), Some("invalid url"));
 }

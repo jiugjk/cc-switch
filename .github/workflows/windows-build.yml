@@ -1,12 +1,16 @@
 name: Windows Build
 
 # Free automated Windows builds for the fork: no signing key or updater
-# secrets required. Publishes only after CI succeeds on main (or manual
-# dispatch on main). Each successful publish creates
+# secrets required. Publishes only after CI succeeds for a push to main in
+# this same repo (or manual dispatch on main); CI runs chained from fork PRs
+# never build or publish. Each successful publish creates
 # Release v{package.version}-fork.<run_number> with NSIS / MSI / portable.
 on:
   workflow_dispatch:
   # Gate releases on green CI instead of racing a parallel push trigger.
+  # NOTE: this branches filter matches workflow_run.head_branch, which a fork
+  # PR from a branch named "main" also satisfies — the job-level `if` below
+  # additionally requires event=='push' and a same-repo head_repository.
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -24,10 +28,15 @@ jobs:
   build:
     name: Build Windows x64 (NSIS + MSI)
     runs-on: windows-2022
-    # Manual: main only. Auto: only when the triggering CI run on main succeeded.
+    # Manual: main only. Auto: only when the triggering CI run was a push to
+    # main in THIS repo and succeeded. The event/head_repository guards reject
+    # fork-PR CI runs (a fork branch named "main" would otherwise satisfy the
+    # head_branch check and run untrusted code with a write token).
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     steps:
@@ -85,9 +94,9 @@ jobs:
       - name: TypeScript type check
         run: pnpm typecheck
 
-      # tauri.conf.json enables createUpdaterArtifacts, which requires the
-      # TAURI_SIGNING_PRIVATE_KEY secret. This fork build has no signing key,
-      # so merge an inline override that disables updater artifacts.
+      # tauri.conf.json already disables createUpdaterArtifacts (the fork has
+      # no TAURI_SIGNING_PRIVATE_KEY and no update channel). Keep the inline
+      # override as defense in depth against the flag being re-enabled.
       - name: Build Tauri app
         shell: bash
         run: pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}' --bundles nsis,msi
@@ -146,10 +155,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Create GitHub Release
-        # Only main (push via green CI, or dispatch on main) publishes.
+        # Only main publishes: same-repo push via green CI, or dispatch on main.
+        # Same event/head_repository guards as the job-level if (fork-PR CI
+        # runs must never reach a contents:write release step).
         if: >-
           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
           (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_repository.full_name == github.repository &&
            github.event.workflow_run.head_branch == 'main' &&
            github.event.workflow_run.conclusion == 'success')
         uses: softprops/action-gh-release@v2

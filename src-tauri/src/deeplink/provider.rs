@@ -405,7 +405,14 @@ fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
     let model_name = toml_edit::Value::from(model_name.as_str()).to_string();
     let endpoint = toml_edit::Value::from(endpoint.as_str()).to_string();
 
-    // Build config.toml content
+    // Build config.toml content.
+    // requires_openai_auth follows the generation-time default setting; the
+    // imported provider's TOML stays per-provider editable afterwards.
+    let requires_openai_auth_line = if crate::settings::codex_default_requires_openai_auth() {
+        "requires_openai_auth = true\n"
+    } else {
+        ""
+    };
     let config_toml = format!(
         r#"model_provider = "custom"
 model = {model_name}
@@ -416,8 +423,7 @@ disable_response_storage = true
 name = {provider_display_name}
 base_url = {endpoint}
 wire_api = "responses"
-requires_openai_auth = true
-"#
+{requires_openai_auth_line}"#
     );
 
     json!({
@@ -1034,5 +1040,44 @@ mod tests {
         let obj = settings.as_object().unwrap();
         assert!(obj.contains_key("baseUrl"));
         assert!(obj.contains_key("apiKey"));
+    }
+
+    // 生成结果依赖全局设置：显式钉住设置值（serial + AmbientSettings）。
+    #[test]
+    #[serial_test::serial]
+    fn build_codex_settings_honors_requires_openai_auth_setting() {
+        let request = DeepLinkImportRequest {
+            resource: "provider".to_string(),
+            app: Some("codex".to_string()),
+            name: Some("Custom".to_string()),
+            endpoint: Some("https://api.example.com/v1".to_string()),
+            api_key: Some("sk-test".to_string()),
+            ..Default::default()
+        };
+
+        let config_with_setting = |settings_json: &str| {
+            let _settings = crate::settings::test_support::AmbientSettings::pin(settings_json);
+            build_codex_settings(&request)
+                .get("config")
+                .and_then(|value| value.as_str())
+                .expect("config text")
+                .to_string()
+        };
+
+        let config_on = config_with_setting(r#"{"codexDefaultRequiresOpenaiAuth": true}"#);
+        assert!(config_on.contains("requires_openai_auth = true"));
+
+        let config_off = config_with_setting(r#"{"codexDefaultRequiresOpenaiAuth": false}"#);
+        assert!(!config_off.contains("requires_openai_auth"));
+        // 关掉默认值后生成的仍是合法 TOML，且其余字段不受影响
+        let parsed: toml::Value = toml::from_str(&config_off).expect("valid Codex config");
+        assert_eq!(
+            parsed
+                .get("model_providers")
+                .and_then(|value| value.get("custom"))
+                .and_then(|value| value.get("wire_api"))
+                .and_then(|value| value.as_str()),
+            Some("responses")
+        );
     }
 }

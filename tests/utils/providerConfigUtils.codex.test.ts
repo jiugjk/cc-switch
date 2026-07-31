@@ -9,9 +9,13 @@ import {
   setCodexBaseUrl,
   setCodexGoalMode,
   setCodexModelName,
+  setCodexModelReasoningEffort,
   setCodexTopLevelInt,
+  stripCodexRequiresOpenaiAuth,
   updateCodexExperimentalBearerToken,
 } from "@/utils/providerConfigUtils";
+import { getCodexCustomTemplate } from "@/config/codexTemplates";
+import { generateThirdPartyConfig } from "@/config/codexProviderPresets";
 
 describe("Codex TOML utils", () => {
   it("removes base_url line when set to empty", () => {
@@ -445,5 +449,131 @@ describe("Codex TOML utils", () => {
     ].join("\n");
 
     expect(extractCodexExperimentalBearerToken(input)).toBe("top-level-key");
+  });
+});
+
+describe("stripCodexRequiresOpenaiAuth", () => {
+  it("removes the field only from the active model_provider section, keeping comments and other keys", () => {
+    const input = [
+      "# my config",
+      'model_provider = "custom"',
+      'model = "gpt-5.5"',
+      "",
+      "[model_providers.custom]",
+      "# provider comment",
+      'name = "custom"',
+      'base_url = "https://api.example.com/v1"',
+      "requires_openai_auth = true",
+      'wire_api = "responses"',
+      "",
+      "[model_providers.other]",
+      "requires_openai_auth = true",
+      "",
+    ].join("\n");
+
+    const output = stripCodexRequiresOpenaiAuth(input);
+
+    expect(output).toContain("# my config");
+    expect(output).toContain("# provider comment");
+    expect(output).toContain('wire_api = "responses"');
+    expect(output).toContain('base_url = "https://api.example.com/v1"');
+    // 仅当前 model_provider 区块内的行被移除
+    const activeSection = output.split("[model_providers.other]")[0];
+    expect(activeSection).not.toContain("requires_openai_auth");
+    // 其它供应商区块保持不动
+    expect(output).toMatch(
+      /\[model_providers\.other\]\nrequires_openai_auth = true/,
+    );
+  });
+
+  it("is a no-op when the field is absent", () => {
+    const input = [
+      'model_provider = "custom"',
+      "",
+      "[model_providers.custom]",
+      'name = "custom"',
+      'wire_api = "responses"',
+      "",
+    ].join("\n");
+
+    expect(stripCodexRequiresOpenaiAuth(input)).toBe(input);
+  });
+
+  it("strips the line from the custom template output", () => {
+    const template = getCodexCustomTemplate();
+    expect(template.config).toContain("requires_openai_auth = true");
+
+    const stripped = stripCodexRequiresOpenaiAuth(template.config);
+    expect(stripped).not.toContain("requires_openai_auth");
+    expect(stripped).toContain('wire_api = "responses"');
+    expect(stripped).toContain('model_provider = "custom"');
+  });
+
+  it("strips the line from generateThirdPartyConfig output", () => {
+    const config = generateThirdPartyConfig(
+      "relay",
+      "https://relay.example.com/v1",
+      "gpt-5.5",
+    );
+    expect(config).toContain("requires_openai_auth = true");
+
+    const stripped = stripCodexRequiresOpenaiAuth(config);
+    expect(stripped).not.toContain("requires_openai_auth");
+    expect(stripped).toContain('base_url = "https://relay.example.com/v1"');
+    expect(stripped).toContain('name = "relay"');
+  });
+});
+
+describe("setCodexModelReasoningEffort", () => {
+  it("inserts the field after the top-level model line when missing", () => {
+    const input = [
+      'model_provider = "custom"',
+      'model = "gpt-5.5"',
+      "",
+      "[model_providers.custom]",
+      'name = "custom"',
+      "",
+    ].join("\n");
+
+    const output = setCodexModelReasoningEffort(input, "high");
+    expect(output).toMatch(
+      /model = "gpt-5\.5"\nmodel_reasoning_effort = "high"/,
+    );
+  });
+
+  it("replaces an existing top-level value and removes on empty", () => {
+    const input = [
+      'model_provider = "custom"',
+      'model = "gpt-5.5"',
+      'model_reasoning_effort = "low"',
+      "",
+      "[model_providers.custom]",
+      'name = "custom"',
+      "",
+    ].join("\n");
+
+    const replaced = setCodexModelReasoningEffort(input, "medium");
+    expect(replaced).toContain('model_reasoning_effort = "medium"');
+    expect(replaced).not.toContain('model_reasoning_effort = "low"');
+
+    const removed = setCodexModelReasoningEffort(replaced, "");
+    expect(removed).not.toContain("model_reasoning_effort");
+    expect(extractCodexModelName(removed)).toBe("gpt-5.5");
+  });
+
+  it("does not touch section-level fields with the same name", () => {
+    const input = [
+      'model_provider = "custom"',
+      "",
+      "[profiles.default]",
+      'model_reasoning_effort = "low"',
+      "",
+    ].join("\n");
+
+    const output = setCodexModelReasoningEffort(input, "high");
+    expect(output).toMatch(/^model_reasoning_effort = "high"$/m);
+    expect(output).toMatch(
+      /\[profiles\.default\]\nmodel_reasoning_effort = "low"/,
+    );
   });
 });

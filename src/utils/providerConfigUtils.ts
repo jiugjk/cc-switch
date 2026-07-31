@@ -1454,6 +1454,108 @@ export const setCodexModelName = (
   return finalizeTomlText(lines);
 };
 
+// ========== Codex model_reasoning_effort utils ==========
+
+const TOML_REASONING_EFFORT_DOUBLE_QUOTED_PATTERN =
+  /^\s*model_reasoning_effort\s*=\s*"((?:[^"\\\r\n]|\\.)*)"\s*(?:#.*)?$/;
+const TOML_REASONING_EFFORT_SINGLE_QUOTED_PATTERN =
+  /^\s*model_reasoning_effort\s*=\s*'([^'\r\n]*)'\s*(?:#.*)?$/;
+
+const findTopLevelReasoningEffortLineIndex = (
+  lines: string[],
+  topLevelEndIndex: number,
+): number => {
+  for (let i = 0; i < topLevelEndIndex; i += 1) {
+    if (
+      TOML_REASONING_EFFORT_DOUBLE_QUOTED_PATTERN.test(lines[i]) ||
+      TOML_REASONING_EFFORT_SINGLE_QUOTED_PATTERN.test(lines[i])
+    ) {
+      return i;
+    }
+  }
+  return -1;
+};
+
+// 在 Codex 的 TOML 配置文本中写入或更新顶层 model_reasoning_effort 字段
+// （统一供应商编辑预览与后端 update_codex_toml_field 的字段级补丁保持一致）
+export const setCodexModelReasoningEffort = (
+  configText: string,
+  reasoningEffort: string,
+): string => {
+  const trimmed = reasoningEffort.trim();
+  const normalizedText = normalizeTomlText(configText);
+  const lines = normalizedText ? normalizedText.split("\n") : [];
+  const topLevelEndIndex = getTopLevelEndIndex(lines);
+  const existingIndex = findTopLevelReasoningEffortLineIndex(
+    lines,
+    topLevelEndIndex,
+  );
+
+  if (!trimmed) {
+    if (!normalizedText) return normalizedText;
+    if (existingIndex !== -1) {
+      lines.splice(existingIndex, 1);
+    }
+    return finalizeTomlText(lines);
+  }
+
+  const replacementLine = `model_reasoning_effort = ${tomlBasicString(trimmed)}`;
+  if (existingIndex !== -1) {
+    lines[existingIndex] = replacementLine;
+    return finalizeTomlText(lines);
+  }
+
+  const modelLineIndex = findTopLevelModelLineIndex(lines, topLevelEndIndex);
+  if (modelLineIndex !== -1) {
+    lines.splice(modelLineIndex + 1, 0, replacementLine);
+    return finalizeTomlText(lines);
+  }
+
+  if (lines.length === 0) {
+    return `${replacementLine}\n`;
+  }
+
+  lines.splice(topLevelEndIndex, 0, replacementLine);
+  return finalizeTomlText(lines);
+};
+
+// ========== Codex requires_openai_auth utils ==========
+
+const TOML_REQUIRES_OPENAI_AUTH_PATTERN =
+  /^\s*requires_openai_auth\s*=\s*(true|false)\s*(?:#.*)?$/;
+
+// 从当前 model_provider 对应的 [model_providers.*] 区块中移除
+// requires_openai_auth 行。仅动当前区块，注释与其余键保持原样；
+// 不存在该行时为 no-op（原文返回）。
+// 用途：当"新配置默认包含 requires_openai_auth"设置关闭时，
+// 在套用预设/自定义模板时剥掉模板里的该行（预设是模块加载期生成的
+// 静态字符串，无法在生成时感知运行期设置）。
+export const stripCodexRequiresOpenaiAuth = (configText: string): string => {
+  const normalizedText = normalizeTomlText(configText);
+  if (!normalizedText) return configText;
+
+  const targetSectionName = getCodexProviderSectionName(normalizedText);
+  if (!targetSectionName) return configText;
+
+  const lines = normalizedText.split("\n");
+  const sectionRange = getTomlSectionRange(lines, targetSectionName);
+  if (!sectionRange) return configText;
+
+  const matches = findTomlAssignmentsInRange(
+    lines,
+    TOML_REQUIRES_OPENAI_AUTH_PATTERN,
+    sectionRange.bodyStartIndex,
+    sectionRange.bodyEndIndex,
+    targetSectionName,
+  );
+  if (matches.length === 0) return configText;
+
+  for (const match of [...matches].reverse()) {
+    lines.splice(match.index, 1);
+  }
+  return finalizeTomlText(lines);
+};
+
 // ========== Codex top-level integer field utils ==========
 
 const tomlTopLevelIntPattern = (field: string) =>

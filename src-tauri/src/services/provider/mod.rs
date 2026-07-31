@@ -89,9 +89,17 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
         return Ok(true);
     }
 
+    // 整体重写 live 前先把用户在 [mcp_servers] 里的手工编辑回填进 DB
+    // （warn-degrade，详见 McpService::backfill_live_edits_for_app），
+    // 否则下面的整文件替换 + 重投影会把 DB 里的陈旧规范写回。
+    if let Err(err) = McpService::backfill_live_edits_for_app(state, &AppType::Codex) {
+        log::warn!("统一会话开关重写 live 前回填 Codex MCP 编辑失败: {err}");
+    }
+
     live::write_live_with_common_config(&state.db, &AppType::Codex, provider)?;
     // 重写 live 会整体替换 config.toml（有意设计），[mcp_servers] 随之丢失，
-    // 写完必须立刻从 DB 重新投影启用的 MCP。只投影 Codex 而非
+    // 写完必须立刻从 DB 重新投影启用的 MCP（上方的回填保证 DB 已吸收 live
+    // 里的手工编辑，重投影写回的是最新值）。只投影 Codex 而非
     // sync_all_enabled：后者按 AppType::all() 顺序逐应用短路，排在 Codex
     // 前面的无关应用 live 损坏（如 ~/.claude.json 坏 JSON）会阻断 Codex
     // 的重投影，让刚被清掉的 [mcp_servers] 无人补回。
@@ -124,7 +132,7 @@ mod tests {
     use crate::database::Database;
     #[cfg(any(target_os = "macos", windows))]
     use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute};
-    use crate::provider::{ProviderMeta, UsageScript};
+    use crate::provider::{CodexModelConfig, ProviderMeta, UniversalProvider, UsageScript};
     use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
     use serde_json::json;
@@ -465,6 +473,142 @@ mod tests {
 
             assert_eq!(script.api_key, None);
             assert_eq!(script.base_url, None);
+        });
+    }
+
+    /// 在 temp home 里钉住 settings.json 并重载全局设置存储，
+    /// 让依赖生成默认值的断言不受同进程其它测试遗留状态影响。
+    fn pin_test_settings(home: &Path, settings_json: &str) {
+        let cc_dir = home.join(".cc-switch");
+        fs::create_dir_all(&cc_dir).expect("create .cc-switch dir");
+        fs::write(cc_dir.join("settings.json"), settings_json).expect("write settings.json");
+        crate::settings::reload_settings().expect("reload settings");
+    }
+
+    fn universal_codex_fixture() -> UniversalProvider {
+        let mut universal = UniversalProvider::new(
+            "u1".to_string(),
+            "Universal".to_string(),
+            "newapi".to_string(),
+            "https://api.example.com".to_string(),
+            "key-1".to_string(),
+        );
+        universal.apps.codex = true;
+        universal.models.codex = Some(CodexModelConfig {
+            model: Some("gpt-4o-mini".to_string()),
+            reasoning_effort: Some("low".to_string()),
+        });
+        universal
+    }
+
+    fn derived_codex_config(state: &AppState) -> (crate::provider::Provider, String) {
+        let derived = state
+            .db
+            .get_provider_by_id("universal-codex-u1", "codex")
+            .expect("query derived provider")
+            .expect("derived provider exists");
+        let config = derived
+            .settings_config
+            .get("config")
+            .and_then(|value| value.as_str())
+            .expect("config toml")
+            .to_string();
+        (derived, config)
+    }
+
+    #[test]
+    #[serial]
+    fn sync_universal_to_apps_preserves_manual_codex_config_edits() {
+        with_test_home(|state, home| {
+            pin_test_settings(home, r#"{"codexDefaultRequiresOpenaiAuth": true}"#);
+
+            let mut universal = universal_codex_fixture();
+            state
+                .db
+                .save_universal_provider(&universal)
+                .expect("save universal provider");
+            ProviderService::sync_universal_to_apps(state, "u1").expect("first sync");
+
+            // 用户手工编辑派生供应商：删除 requires_openai_auth，追加自定义键
+            let (derived, config) = derived_codex_config(state);
+            assert!(config.contains("requires_openai_auth = true"));
+            let edited = format!(
+                "{}\ncustom_flag = true\n",
+                config.replace("\nrequires_openai_auth = true", "")
+            );
+            let mut edited_provider = derived.clone();
+            edited_provider.settings_config["config"] = json!(edited);
+            state
+                .db
+                .save_provider("codex", &edited_provider)
+                .expect("save manual edit");
+
+            // 统一表单改 baseUrl / apiKey / model / reasoning 后再次同步
+            universal.base_url = "https://api2.example.com".to_string();
+            universal.api_key = "key-2".to_string();
+            universal.models.codex = Some(CodexModelConfig {
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some("high".to_string()),
+            });
+            state
+                .db
+                .save_universal_provider(&universal)
+                .expect("update universal provider");
+            ProviderService::sync_universal_to_apps(state, "u1").expect("second sync");
+
+            let (resynced, new_config) = derived_codex_config(state);
+            // 手工编辑保留（字段级补丁，不再整串再生成覆盖）
+            assert!(!new_config.contains("requires_openai_auth"));
+            assert!(new_config.contains("custom_flag = true"));
+            // 表单字段仍然传播（含 /v1 归一化）
+            assert!(new_config.contains("base_url = \"https://api2.example.com/v1\""));
+            assert!(new_config.contains("model = \"gpt-5\""));
+            assert!(new_config.contains("model_reasoning_effort = \"high\""));
+            assert!(!new_config.contains("model_reasoning_effort = \"low\""));
+            assert_eq!(
+                resynced
+                    .settings_config
+                    .pointer("/auth/OPENAI_API_KEY")
+                    .and_then(|value| value.as_str()),
+                Some("key-2")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn sync_universal_to_apps_regenerates_when_existing_codex_config_unparseable() {
+        with_test_home(|state, home| {
+            pin_test_settings(home, r#"{"codexDefaultRequiresOpenaiAuth": true}"#);
+
+            let mut universal = universal_codex_fixture();
+            state
+                .db
+                .save_universal_provider(&universal)
+                .expect("save universal provider");
+            ProviderService::sync_universal_to_apps(state, "u1").expect("first sync");
+
+            // 派生配置损坏（无法解析的 TOML）：同步必须回退到整体再生成自愈
+            let (derived, _) = derived_codex_config(state);
+            let mut corrupted = derived.clone();
+            corrupted.settings_config["config"] = json!("not [ valid toml");
+            state
+                .db
+                .save_provider("codex", &corrupted)
+                .expect("save corrupted config");
+
+            universal.base_url = "https://api2.example.com".to_string();
+            state
+                .db
+                .save_universal_provider(&universal)
+                .expect("update universal provider");
+            ProviderService::sync_universal_to_apps(state, "u1").expect("second sync");
+
+            let (_, new_config) = derived_codex_config(state);
+            assert!(new_config.contains("model_provider = \"custom\""));
+            assert!(new_config.contains("base_url = \"https://api2.example.com/v1\""));
+            // 再生成路径遵循生成默认值（此处钉为 true）
+            assert!(new_config.contains("requires_openai_auth = true"));
         });
     }
 
@@ -1283,6 +1427,16 @@ requires_openai_auth = true
         db.save_live_backup("claude-desktop", "{}")
             .await
             .expect("seed live backup");
+        // Bind an ephemeral port: the default listen port is often already held by a
+        // locally installed cc-switch instance, which would fail the bind (os error
+        // 10048) and make this test depend on the developer machine's state.
+        db.update_proxy_config(ProxyConfig {
+            live_takeover_active: true,
+            listen_port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("update proxy config");
         {
             let mut config = db
                 .get_proxy_config_for_app("claude-desktop")
@@ -1294,7 +1448,7 @@ requires_openai_auth = true
                 .expect("update app proxy config");
         }
 
-        state
+        let proxy_info = state
             .proxy_service
             .start()
             .await
@@ -1342,7 +1496,10 @@ requires_openai_auth = true
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!(
+                "http://127.0.0.1:{}/claude-desktop",
+                proxy_info.port
+            )),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -2344,6 +2501,14 @@ impl ProviderService {
                     }
                 }
             } else {
+                // 整体重写 live 前先把 Codex / Grok Build 用户在 [mcp_servers]
+                // 里的手工编辑回填进 DB（warn-degrade，详见
+                // McpService::backfill_live_edits_for_app）。
+                if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
+                    if let Err(err) = McpService::backfill_live_edits_for_app(state, &app_type) {
+                        log::warn!("保存供应商前回填 {app_type:?} 的 MCP 编辑失败: {err}");
+                    }
+                }
                 write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
                 // 重写 live 后只重投影本应用的 MCP：全量 sync_all_enabled 会把
                 // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）牵连进保存
@@ -2630,37 +2795,71 @@ impl ProviderService {
         if let Some(current_id) = current_id {
             if current_id != id {
                 // Additive mode apps - all providers coexist in the same file,
-                // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini)
-                if !app_type.is_additive_mode() {
+                // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini).
+                // Claude Desktop's live read is unsupported by design
+                // (read_live_settings always errors), so attempting it would
+                // surface a spurious backfill_live_read_failed warning.
+                if !app_type.is_additive_mode() && !matches!(app_type, AppType::ClaudeDesktop) {
                     // Only backfill when switching to a different provider
-                    if let Ok(live_config) = read_live_settings(app_type.clone()) {
-                        if let Some(mut current_provider) = providers.get(&current_id).cloned() {
-                            // 切走前先把 live 里的可共享改动（含用户直接在应用内
-                            // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
-                            // 详见 sync_common_config_snippet_from_live 的文档。
-                            Self::sync_common_config_snippet_from_live(
-                                state,
-                                &app_type,
-                                &current_provider,
-                                &live_config,
-                                &mut result,
-                            );
+                    match read_live_settings(app_type.clone()) {
+                        Ok(live_config) => {
+                            // Before the switch-in overwrite, fan a fresher live
+                            // ChatGPT OAuth login out into every same-account
+                            // OAuth Codex row, so stale snapshots (whose rotated
+                            // refresh tokens may already be revoked) stop
+                            // accumulating in the DB and in exports/cloud sync.
+                            if matches!(app_type, AppType::Codex) {
+                                Self::fan_out_fresh_codex_oauth_to_providers(
+                                    state,
+                                    providers,
+                                    &current_id,
+                                    &live_config,
+                                    &mut result,
+                                );
+                            }
 
-                            current_provider.settings_config =
-                                strip_common_config_from_live_settings(
-                                    state.db.as_ref(),
+                            if let Some(mut current_provider) = providers.get(&current_id).cloned()
+                            {
+                                // 切走前先把 live 里的可共享改动（含用户直接在应用内
+                                // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
+                                // 详见 sync_common_config_snippet_from_live 的文档。
+                                Self::sync_common_config_snippet_from_live(
+                                    state,
                                     &app_type,
                                     &current_provider,
-                                    live_config,
+                                    &live_config,
+                                    &mut result,
                                 );
-                            if let Err(e) =
-                                state.db.save_provider(app_type.as_str(), &current_provider)
-                            {
-                                log::warn!("Backfill failed: {e}");
-                                result
-                                    .warnings
-                                    .push(format!("backfill_failed:{current_id}"));
+
+                                current_provider.settings_config =
+                                    strip_common_config_from_live_settings(
+                                        state.db.as_ref(),
+                                        &app_type,
+                                        &current_provider,
+                                        live_config,
+                                    );
+                                if let Err(e) =
+                                    state.db.save_provider(app_type.as_str(), &current_provider)
+                                {
+                                    log::warn!("Backfill failed: {e}");
+                                    result
+                                        .warnings
+                                        .push(format!("backfill_failed:{current_id}"));
+                                }
                             }
+                        }
+                        Err(e) => {
+                            // A fresh login (e.g. `codex login`) must not be silently
+                            // dropped just because live config is temporarily
+                            // unreadable (invalid config.toml): surface the skipped
+                            // backfill as a switch warning instead.
+                            log::warn!(
+                                "Backfill skipped: failed to read live settings for {}: {e}",
+                                app_type.as_str()
+                            );
+                            result
+                                .warnings
+                                .push(format!("backfill_live_read_failed:{current_id}"));
                         }
                     }
                 }
@@ -2674,6 +2873,21 @@ impl ProviderService {
 
             // Update database is_current (as default for new devices)
             state.db.set_current_provider(app_type.as_str(), id)?;
+        }
+
+        // Codex / Grok Build 的 [mcp_servers] 与 live 同文件：下面的整文件重写
+        // + DB 重投影会覆盖用户直接在 live 里做的 MCP 手工编辑。写入前先把
+        // live 编辑回填进 DB（MCP SSOT，live 优先），随后的重投影就会把新值
+        // 写回。必须无条件执行（包括重选当前供应商——上面的 provider 回填块
+        // 只在 current_id != id 时运行，但整文件重写与重投影总会发生）。
+        // warn-degrade：回填失败绝不阻断切换。
+        if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
+            if let Err(err) = McpService::backfill_live_edits_for_app(state, &app_type) {
+                log::warn!("重写 live 前回填 {app_type:?} 的 MCP 编辑失败: {err}");
+                result
+                    .warnings
+                    .push(format!("mcp_backfill_failed:{}", app_type.as_str()));
+            }
         }
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
@@ -2734,7 +2948,9 @@ impl ProviderService {
         }
 
         // 切换重写了目标应用的 live，只重投影该应用的 MCP（Codex 的
-        // [mcp_servers] 与 live 同文件，整体替换后必须补回；其余应用的
+        // [mcp_servers] 与 live 同文件，整体替换后必须补回；重写前的
+        // backfill_live_edits_for_app 已把 live 手工编辑吸收进 DB，此处
+        // 写回的是最新规范。其余应用的
         // MCP 文件独立于 live，投影是幂等维护）。不用全量 sync_all_enabled：
         // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）不该阻断切换。
         // 走到这里 DB is_current 与 live 都已落盘，切换事实上已成功；
@@ -2745,6 +2961,69 @@ impl ProviderService {
         }
 
         Ok(result)
+    }
+
+    /// Best-effort DB convergence run during the Codex switch backfill: copy a
+    /// fresher live ChatGPT OAuth login (`~/.codex/auth.json`) into every
+    /// stored Codex provider row that already carries OAuth material for the
+    /// same account. Without this, only the outgoing row picks up a fresh
+    /// `codex login`, and every other row keeps rotated (possibly revoked)
+    /// refresh tokens forever — which then get written back over live on the
+    /// next switch-in.
+    ///
+    /// Gates (see `merge_fresher_live_codex_oauth`): the STORED row must be
+    /// OAuth-shaped (API-key rows and empty-auth official rows are skipped, so
+    /// tokens never leak into rows that deliberately hold none), the
+    /// `tokens.account_id` must match (or be absent on both sides), and live
+    /// `last_refresh` must be at least as fresh. `tokens` is replaced
+    /// wholesale together with `last_refresh` / `auth_mode`.
+    ///
+    /// Warn-only: a failed save pushes a warning and never blocks the switch.
+    /// The outgoing provider (`skip_id`) is excluded — it receives the full
+    /// live backfill in the caller.
+    fn fan_out_fresh_codex_oauth_to_providers(
+        state: &AppState,
+        providers: &indexmap::IndexMap<String, Provider>,
+        skip_id: &str,
+        live_config: &Value,
+        result: &mut SwitchResult,
+    ) {
+        let Some(live_auth) = live_config.get("auth") else {
+            return;
+        };
+        if !crate::codex_config::codex_auth_has_oauth_login_material(live_auth) {
+            return;
+        }
+
+        for (provider_id, provider) in providers {
+            if provider_id.as_str() == skip_id {
+                continue;
+            }
+            let Some(stored_auth) = provider.settings_config.get("auth") else {
+                continue;
+            };
+            let Some(merged) =
+                crate::codex_config::merge_fresher_live_codex_oauth(stored_auth, live_auth)
+            else {
+                continue;
+            };
+            if merged == *stored_auth {
+                continue;
+            }
+
+            let mut updated = provider.clone();
+            let Some(obj) = updated.settings_config.as_object_mut() else {
+                continue;
+            };
+            obj.insert("auth".to_string(), merged);
+
+            if let Err(e) = state.db.save_provider(AppType::Codex.as_str(), &updated) {
+                log::warn!("Fresh Codex OAuth fan-out failed for {provider_id}: {e}");
+                result
+                    .warnings
+                    .push(format!("oauth_fanout_failed:{provider_id}"));
+            }
+        }
     }
 
     /// Sync current provider to live configuration (re-export)
@@ -3935,8 +4214,29 @@ impl ProviderService {
         if let Some(mut codex_provider) = provider.to_codex_provider() {
             // 合并已有配置
             if let Some(existing) = state.db.get_provider_by_id(&codex_provider.id, "codex")? {
+                let existing_config = existing
+                    .settings_config
+                    .get("config")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+
+                // 字段级补丁：只把统一表单可编辑的 base_url / model /
+                // model_reasoning_effort 打进已有 config 文本，保留用户对派生
+                // 供应商的手工 TOML 编辑（如删除 requires_openai_auth、追加
+                // 自定义键）。整串替换（merge_json 对字符串是整体覆盖）会在
+                // 每次同步时冲掉这些编辑。
+                let patched_config = existing_config
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                    .and_then(|text| Self::patch_universal_codex_config(text, &provider));
+
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &codex_provider.settings_config);
+                if let Some(config) = patched_config {
+                    merged["config"] = serde_json::Value::String(config);
+                }
+                // patched_config 为 None（已有 config 缺失/为空/TOML 解析失败）
+                // 时保持 merge 后的整体再生成结果：沿用旧行为自愈损坏的配置。
                 codex_provider.settings_config = merged;
             }
             state.db.save_provider("codex", &codex_provider)?;
@@ -3960,6 +4260,34 @@ impl ProviderService {
         }
 
         Ok(true)
+    }
+
+    /// 把统一供应商表单字段（base_url / model / model_reasoning_effort）
+    /// 字段级打进派生 Codex 供应商的已有 config 文本。
+    ///
+    /// 返回 `None` 表示已有文本无法解析为 TOML——调用方应回退到
+    /// `to_codex_provider()` 的整体再生成（沿用旧行为自愈损坏的配置）。
+    /// base_url 复用 `to_codex_provider` 的 /v1 归一化，保证纯 origin 的
+    /// 统一 base_url 不会被不带版本地写入。
+    fn patch_universal_codex_config(
+        existing_config: &str,
+        provider: &crate::provider::UniversalProvider,
+    ) -> Option<String> {
+        let base_url = provider.codex_base_url();
+        let model = provider.codex_model();
+        let reasoning_effort = provider.codex_reasoning_effort();
+
+        let patched =
+            crate::codex_config::update_codex_toml_field(existing_config, "base_url", &base_url)
+                .ok()?;
+        let patched =
+            crate::codex_config::update_codex_toml_field(&patched, "model", &model).ok()?;
+        crate::codex_config::update_codex_toml_field(
+            &patched,
+            "model_reasoning_effort",
+            &reasoning_effort,
+        )
+        .ok()
     }
 
     /// 递归合并 JSON：base 为底，patch 覆盖同名字段

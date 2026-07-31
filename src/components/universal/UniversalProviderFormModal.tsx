@@ -17,6 +17,25 @@ import {
   type UniversalProviderPreset,
 } from "@/config/universalProviderPresets";
 import { deepClone } from "@/utils/deepClone";
+import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
+import {
+  setCodexBaseUrl,
+  setCodexModelName,
+  setCodexModelReasoningEffort,
+  stripCodexRequiresOpenaiAuth,
+} from "@/utils/providerConfigUtils";
+
+// 与后端 to_codex_provider 的 /v1 归一化保持一致：
+// 纯 origin 补 /v1；已带 /v1 或自定义路径前缀的保持原样。
+const normalizeCodexBaseUrl = (baseUrl: string): string => {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  if (trimmed.endsWith("/v1")) return trimmed;
+  const schemeSplit = trimmed.split("://");
+  const rest =
+    schemeSplit.length > 1 ? schemeSplit.slice(1).join("://") : trimmed;
+  const originOnly = !rest.includes("/");
+  return originOnly ? `${trimmed}/v1` : trimmed;
+};
 
 interface UniversalProviderFormModalProps {
   isOpen: boolean;
@@ -146,15 +165,41 @@ export function UniversalProviderFormModal({
   }, [claudeEnabled, baseUrl, apiKey, models.claude]);
 
   // 计算 Codex 配置 JSON 预览
+  // 编辑模式下若派生供应商已存在，则以其现有 config 为底做字段级补丁
+  // （与后端 sync_universal_to_apps 的同步行为一致），保留用户对派生
+  // 配置的手工 TOML 编辑（如删除 requires_openai_auth）；仅在无现有
+  // 配置时整体生成，并遵循"新配置默认包含 requires_openai_auth"设置。
+  const { data: codexProvidersData } = useProvidersQuery("codex");
+  const { data: appSettings } = useSettingsQuery();
+  const codexDefaultRequiresOpenaiAuth =
+    appSettings?.codexDefaultRequiresOpenaiAuth ?? true;
+  const existingDerivedCodexConfig = editingProvider
+    ? codexProvidersData?.providers?.[`universal-codex-${editingProvider.id}`]
+        ?.settingsConfig?.config
+    : undefined;
   const codexConfigJson = useMemo(() => {
     if (!codexEnabled) return null;
     const model = models.codex?.model || "gpt-5.5";
     const reasoningEffort = models.codex?.reasoningEffort || "high";
-    // 确保 base_url 以 /v1 结尾（Codex 使用 OpenAI 兼容 API）
-    const codexBaseUrl = baseUrl.endsWith("/v1")
-      ? baseUrl
-      : `${baseUrl.replace(/\/+$/, "")}/v1`;
-    const configToml = `model_provider = "custom"
+    // 确保纯 origin 的 base_url 以 /v1 结尾（Codex 使用 OpenAI 兼容 API）
+    const codexBaseUrl = normalizeCodexBaseUrl(baseUrl);
+
+    if (
+      typeof existingDerivedCodexConfig === "string" &&
+      existingDerivedCodexConfig.trim()
+    ) {
+      let patched = setCodexBaseUrl(existingDerivedCodexConfig, codexBaseUrl);
+      patched = setCodexModelName(patched, model);
+      patched = setCodexModelReasoningEffort(patched, reasoningEffort);
+      return {
+        auth: {
+          OPENAI_API_KEY: apiKey,
+        },
+        config: patched,
+      };
+    }
+
+    let configToml = `model_provider = "custom"
 model = "${model}"
 model_reasoning_effort = "${reasoningEffort}"
 disable_response_storage = true
@@ -164,13 +209,23 @@ name = "NewAPI"
 base_url = "${codexBaseUrl}"
 wire_api = "responses"
 requires_openai_auth = true`;
+    if (!codexDefaultRequiresOpenaiAuth) {
+      configToml = stripCodexRequiresOpenaiAuth(configToml);
+    }
     return {
       auth: {
         OPENAI_API_KEY: apiKey,
       },
       config: configToml,
     };
-  }, [codexEnabled, baseUrl, apiKey, models.codex]);
+  }, [
+    codexEnabled,
+    baseUrl,
+    apiKey,
+    models.codex,
+    existingDerivedCodexConfig,
+    codexDefaultRequiresOpenaiAuth,
+  ]);
 
   // 计算 Gemini 配置 JSON 预览
   const geminiConfigJson = useMemo(() => {

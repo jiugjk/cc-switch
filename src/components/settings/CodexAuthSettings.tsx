@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { History, KeyRound } from "lucide-react";
+import { History, KeyRound, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import { ToggleRow } from "@/components/ui/toggle-row";
@@ -111,6 +111,16 @@ export function CodexAuthSettings({
         description={t("settings.unifyCodexSessionHistoryDescription")}
         checked={settings.unifyCodexSessionHistory ?? false}
         onCheckedChange={handleUnifyHistoryChange}
+      />
+
+      <ToggleRow
+        icon={<ShieldCheck className="h-4 w-4 text-amber-500" />}
+        title={t("settings.codexDefaultRequiresOpenaiAuth")}
+        description={t("settings.codexDefaultRequiresOpenaiAuthDescription")}
+        checked={settings.codexDefaultRequiresOpenaiAuth ?? true}
+        onCheckedChange={(value) =>
+          onChange({ codexDefaultRequiresOpenaiAuth: value })
+        }
       />
 
       <ConfirmDialog

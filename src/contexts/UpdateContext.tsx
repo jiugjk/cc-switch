@@ -115,15 +115,8 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(LEGACY_DISMISSED_KEY);
   }, []);
 
-  // 应用启动时自动检查更新
-  useEffect(() => {
-    // 延迟1秒后检查，避免影响启动体验
-    const timer = setTimeout(() => {
-      checkUpdate().catch(console.error);
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [checkUpdate]);
+  // 本 fork 已禁用应用内自动更新：不再于启动时自动检查（checkForUpdate 也
+  // 只是恒返回 up-to-date 的桩），hasUpdate 恒为 false，徽标/横幅不会出现。
 
   const value: UpdateContextValue = {
     hasUpdate,

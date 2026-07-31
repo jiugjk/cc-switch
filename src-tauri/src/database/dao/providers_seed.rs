@@ -33,7 +33,7 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         id: "claude-official",
         app_type: AppType::Claude,
         name: "Claude Official",
-        website_url: "https://www.anthropic.com/claude-code",
+        website_url: "https://claude.com/product/claude-code",
         icon: "anthropic",
         icon_color: "#D4915D",
         // 空 env 让用户走 Claude CLI 默认认证流程

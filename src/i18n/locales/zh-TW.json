@@ -427,8 +427,8 @@
           "error": "僅嚴重錯誤",
           "warn": "錯誤 + 警告資訊",
           "info": "一般操作資訊（預設）",
-          "debug": "詳細資訊，包含 SSE 串流與請求/回應詳情",
-          "trace": "全部日誌，最詳細"
+          "debug": "詳細診斷資訊（位元組數、狀態、路由；不含請求/回應內容）",
+          "trace": "全部日誌，含完整請求/回應/SSE 內容——可能包含敏感對話內容"
         }
       }
     },
@@ -695,6 +695,8 @@
     "preserveCodexOfficialAuthOnSwitchDescription": "控制未開啟本機路由時切換第三方供應商是否保留 Codex 官方登入；路由接管期間一律保留",
     "unifyCodexSessionHistory": "統一 Codex 會話歷史",
     "unifyCodexSessionHistoryDescription": "開啟後，官方訂閱將以共享的 custom 供應商標識執行，官方與第三方會話出現在同一歷史清單中，並可選擇把現有官方會話一併遷入（遷移前自動備份）。關閉開關時可按備份恢復遷入的會話。注意：跨供應商繼續舊會話時，對方後端可能無法解密會話中的 encrypted_content 推理內容，導致繼續失敗",
+    "codexDefaultRequiresOpenaiAuth": "新 Codex 設定預設包含 requires_openai_auth",
+    "codexDefaultRequiresOpenaiAuthDescription": "開啟（預設）時，新產生的第三方 Codex 設定包含 requires_openai_auth = true，Codex 會把 auth.json 中的 API Key 傳送給自訂供應商。警告：關閉後，除非設定了 env_key，Codex 將不會向自訂供應商傳送 auth.json 的 API Key——非接管的直連請求將不帶憑證；本機代理接管不受影響。僅影響新產生的設定（預設集、自訂範本、統一供應商同步、深層連結匯入）；已儲存的供應商保持原有 TOML，可逐供應商編輯。統一會話歷史與官方接管注入一律保留該欄位",
     "unifyCodexHistoryRestoreCompleted": "已按備份還原官方會話歷史（{{files}} 個會話檔案、{{rows}} 條索引記錄）",
     "unifyCodexHistoryRestoreFailed": "還原官方會話歷史失敗，請重試",
     "unifyCodexHistoryRestoreNothing": "目前 Codex 目錄沒有可恢復的遷移備份",

@@ -65,6 +65,7 @@ import {
   setCodexWireApi,
   extractCodexModelName,
   setCodexModelName as setCodexModelNameInConfig,
+  stripCodexRequiresOpenaiAuth,
 } from "@/utils/providerConfigUtils";
 import { isNonNegativeDecimalString } from "@/types/usage";
 import { getCodexCustomTemplate } from "@/config/codexTemplates";
@@ -274,6 +275,17 @@ function ProviderFormFull({
   const { data: settingsData } = useSettingsQuery();
   const showCommonConfigNotice =
     settingsData != null && settingsData.commonConfigConfirmed !== true;
+  // 预设/模板是模块加载期生成的静态字符串；当"新 Codex 配置默认包含
+  // requires_openai_auth"设置关闭时，在套用配置到表单前剥掉该行。
+  const codexDefaultRequiresOpenaiAuth =
+    settingsData?.codexDefaultRequiresOpenaiAuth ?? true;
+  const applyCodexRequiresOpenaiAuthDefault = useCallback(
+    (config: string): string =>
+      codexDefaultRequiresOpenaiAuth
+        ? config
+        : stripCodexRequiresOpenaiAuth(config),
+    [codexDefaultRequiresOpenaiAuth],
+  );
   const isDarkMode = useDarkMode();
 
   const handleCommonConfigConfirm = async () => {
@@ -640,11 +652,20 @@ function ProviderFormFull({
   useEffect(() => {
     if (appId === "codex" && !initialData && selectedPresetId === "custom") {
       const template = getCodexCustomTemplate();
-      resetCodexConfig(template.auth, template.config);
+      resetCodexConfig(
+        template.auth,
+        applyCodexRequiresOpenaiAuthDefault(template.config),
+      );
       setCodexChatReasoning({});
       setPromptCacheRouting("auto");
     }
-  }, [appId, initialData, selectedPresetId, resetCodexConfig]);
+  }, [
+    appId,
+    initialData,
+    selectedPresetId,
+    resetCodexConfig,
+    applyCodexRequiresOpenaiAuthDefault,
+  ]);
 
   useEffect(() => {
     form.reset(defaultValues);
@@ -1667,11 +1688,14 @@ function ProviderFormFull({
 
       if (appId === "codex") {
         const template = getCodexCustomTemplate();
-        resetCodexConfig(template.auth, template.config);
+        const templateConfig = applyCodexRequiresOpenaiAuthDefault(
+          template.config,
+        );
+        resetCodexConfig(template.auth, templateConfig);
         setCodexChatReasoning({});
         setPromptCacheRouting("auto");
         setLocalCodexApiFormat(
-          codexApiFormatFromWireApi(extractCodexWireApi(template.config)) ??
+          codexApiFormatFromWireApi(extractCodexWireApi(templateConfig)) ??
             "openai_responses",
         );
       }
@@ -1707,7 +1731,7 @@ function ProviderFormFull({
     if (appId === "codex") {
       const preset = entry.preset as CodexProviderPreset;
       const auth = preset.auth ?? {};
-      const config = preset.config ?? "";
+      const config = applyCodexRequiresOpenaiAuthDefault(preset.config ?? "");
 
       resetCodexConfig(auth, config, preset.modelCatalog ?? []);
       setCodexChatReasoning(preset.codexChatReasoning ?? {});

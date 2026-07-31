@@ -1,14 +1,11 @@
 #![allow(non_snake_case)]
 
-use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::UpdaterExt;
+use tauri::AppHandle;
 
-/// 应用更新下载进度（通过 `update-download-progress` 事件发给前端）。
-#[derive(Clone, serde::Serialize)]
-struct UpdateDownloadProgress {
-    downloaded: u64,
-    total: Option<u64>,
-}
+/// 本 fork 已禁用应用内自动更新（无签名密钥、无 latest.json 更新通道）的统一提示。
+/// 前端捕获该错误后回退到 `check_for_updates`（打开 fork 发布页）的手动流程。
+pub(crate) const UPDATER_DISABLED_MESSAGE: &str =
+    "Auto-update is disabled in this fork; download builds from the GitHub releases page";
 
 fn merge_settings_for_save(
     mut incoming: crate::settings::AppSettings,
@@ -189,99 +186,25 @@ pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 下载并安装应用更新，然后由后端直接重启应用。
+/// 下载并安装应用更新（本 fork 中为禁用桩）。
 ///
-/// macOS 更新会原地替换 `.app` bundle。如果先返回前端、再让旧 WebView 调
-/// `process.relaunch()`，旧进程可能已经处在 bundle 被替换后的不稳定窗口期。
-/// 这里把退出清理、安装和重启串在同一个后端流程中，避免依赖旧前端继续执行。
+/// fork 没有 `TAURI_SIGNING_PRIVATE_KEY`，CI 构建关闭了 `createUpdaterArtifacts`，
+/// 不存在可校验的 latest.json / 签名产物；`plugins.updater` 配置与 updater 插件
+/// 也已整体移除。保留命令桩以维持 IPC 表面（前端无需分叉编译）：调用方拿到
+/// Err 后走 `check_for_updates` 打开 fork 发布页的手动更新流程。
 #[tauri::command]
-pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> {
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
-
-    let Some(update) = updater
-        .check()
-        .await
-        .map_err(|e| format!("检查更新失败: {e}"))?
-    else {
-        return Ok(false);
-    };
-
-    log::info!("开始下载应用更新: {}", update.version);
-    let progress_handle = app.clone();
-    let mut downloaded: u64 = 0;
-    let bytes = update
-        .download(
-            move |chunk_len, content_len| {
-                downloaded = downloaded.saturating_add(chunk_len as u64);
-                let _ = progress_handle.emit(
-                    "update-download-progress",
-                    UpdateDownloadProgress {
-                        downloaded,
-                        total: content_len,
-                    },
-                );
-            },
-            || {},
-        )
-        .await
-        .map_err(|e| format!("下载更新失败: {e}"))?;
-
-    log::info!("开始安装应用更新: {}", update.version);
-
-    #[cfg(target_os = "windows")]
-    {
-        // Windows updater 会在 install() 内启动安装器并直接退出当前进程
-        // （插件内部 std::process::exit(0)，绕过 TrayIcon::drop、不发
-        // NIM_DELETE，会残留死图标——与托盘"退出"路径相同的问题）。
-        // 因此清理只能放在 install 前执行，且必须显式移除托盘图标。
-        crate::save_window_state_before_exit(&app);
-        crate::cleanup_before_exit(&app).await;
-        crate::remove_tray_icon_before_exit(&app);
-        crate::destroy_single_instance_lock(&app);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        update.install(bytes).map_err(|e| {
-            format!(
-                "Windows 更新安装失败: {e}。已执行退出前清理，代理或 Live 接管可能已暂停；请重启应用或重新开启代理后再试。"
-            )
-        })?;
-        Ok(true)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // macOS/Linux install() 会返回；先安装，避免安装失败时误停代理/撤回接管。
-        update
-            .install(bytes)
-            .map_err(|e| format!("安装更新失败: {e}"))?;
-
-        crate::save_window_state_before_exit(&app);
-        crate::cleanup_before_exit(&app).await;
-
-        log::info!("应用更新安装完成，正在重启应用");
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        crate::restart_process(&app);
-    }
+pub async fn install_update_and_restart() -> Result<bool, String> {
+    Err(UPDATER_DISABLED_MESSAGE.to_string())
 }
 
-/// 检查是否有可用的应用更新，返回可用的新版本号（无更新时返回 None）。
+/// 检查是否有可用的应用更新（本 fork 中为禁用桩，恒返回 None）。
 ///
-/// 数据库版本过新的恢复界面用它判断：升级应用能否解决问题。若返回 None，说明
-/// 已是最新版本，但数据库仍不兼容（通常由第三方客户端或更高版本创建），应提示用户
-/// 升级无法解决，而不是让其反复尝试。
+/// 数据库版本过新的恢复界面用它判断：升级应用能否解决问题。fork 无自动更新
+/// 通道，恒返回 None → 恢复界面进入 "incompatible" 分支，引导用户去发布页
+/// 手动下载新构建，而不是提供一条注定失败的一键升级路径。
 #[tauri::command]
-pub async fn check_app_update_available(app: AppHandle) -> Result<Option<String>, String> {
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| format!("检查更新失败: {e}"))?;
-    Ok(update.map(|u| u.version))
+pub async fn check_app_update_available() -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 /// 获取 app_config_dir 覆盖配置 (从 Store)
@@ -617,6 +540,54 @@ mod tests {
         let merged = merge_settings_for_save(incoming, &existing);
 
         assert!(merged.local_migrations.is_none());
+    }
+
+    /// F-001 回归：fork 的更新命令必须保持禁用桩——install 报"已禁用"错误、
+    /// check 恒 None，绝不触达（已移除的）updater 插件状态。
+    #[tokio::test]
+    async fn install_update_and_restart_returns_disabled_error() {
+        let err = super::install_update_and_restart()
+            .await
+            .expect_err("fork updater stub must return Err");
+        assert!(
+            err.contains("disabled in this fork"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_app_update_available_always_returns_none() {
+        assert_eq!(super::check_app_update_available().await, Ok(None));
+    }
+
+    /// F-001 回归：tauri.conf.json 不得再携带上游更新通道——无 plugins.updater
+    /// 配置（上游 pubkey + latest.json endpoint），且 createUpdaterArtifacts 为 false
+    /// （fork 无签名密钥，仓库配置须与 CI 现实一致）。
+    #[test]
+    fn tauri_conf_has_no_upstream_update_channel() {
+        let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"))
+            .expect("read tauri.conf.json");
+        let conf: serde_json::Value = serde_json::from_str(&raw).expect("parse tauri.conf.json");
+
+        assert!(
+            conf.pointer("/plugins/updater").is_none(),
+            "plugins.updater must not exist in the fork config"
+        );
+        assert_eq!(
+            conf.pointer("/bundle/createUpdaterArtifacts"),
+            Some(&serde_json::Value::Bool(false)),
+            "bundle.createUpdaterArtifacts must be false in the fork config"
+        );
+        assert!(
+            !raw.contains("releases/latest/download/latest.json"),
+            "upstream latest.json endpoint must not appear in tauri.conf.json"
+        );
+        assert!(
+            !raw.contains(
+                "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM4MDI4QzlBNTczOTI4RTM"
+            ),
+            "upstream minisign pubkey must not appear in tauri.conf.json"
+        );
     }
 }
 

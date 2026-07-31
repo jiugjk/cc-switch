@@ -76,7 +76,7 @@ export interface ProviderPreset {
 export const providerPresets: ProviderPreset[] = [
   {
     name: "Claude Official",
-    websiteUrl: "https://www.anthropic.com/claude-code",
+    websiteUrl: "https://claude.com/product/claude-code",
     settingsConfig: {
       env: {},
     },

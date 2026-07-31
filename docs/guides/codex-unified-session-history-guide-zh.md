@@ -426,6 +426,8 @@ wire_api = "responses"
 
 每个字段都有作用：`requires_openai_auth = true` 让认证继续走 `auth.json` 里的 ChatGPT 登录、base_url 缺省回落官方 Codex 后端；`name = "OpenAI"` 让 Codex 的官方特性门控（web search、远程压缩等）继续命中；`supports_websockets = true` 补回 custom 条目默认丢失的能力；`wire_api = "responses"` 用官方 responses 协议。**净效果是：认证没变，只是桶名变了。**
 
+> 注意：设置里的"新 Codex 配置默认包含 requires_openai_auth"开关**不影响**这段注入。该开关只改变新第三方配置的生成期默认值；此处该字段是功能必需的（负责路由 auth.json 中的 ChatGPT 登录），且剥离往返依赖注入表的精确形状，因此本功能开启期间始终会写入。
+
 **关键不变量：这段注入只能存在于 live `config.toml`，绝不写进数据库的存储配置。** 切换离开官方供应商、把 live 回写数据库时，CC Switch 会把这段注入精确剥离（只在形态与注入产物完全一致时才剥，第三方自定义的 `custom` 表原样保留）。正因如此，"关掉开关 + 切换一次"就能彻底还原 live，数据库里始终是你原本干净的官方配置——这是整个开关可逆性的基石。
 
 ### 3. 注入的两道拒绝闸（对应场景 C）

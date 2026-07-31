@@ -396,6 +396,16 @@ pub struct AppSettings {
     /// providers. Opt-in: defaults to false.
     #[serde(default)]
     pub unify_codex_session_history: bool,
+    /// Include `requires_openai_auth = true` in newly generated third-party
+    /// Codex configs (universal-provider sync regeneration, deeplink import,
+    /// and frontend preset/custom templates). Defaults to true so auth.json's
+    /// OPENAI_API_KEY keeps being forwarded to custom providers; turning it
+    /// off only affects newly generated configs — saved providers keep their
+    /// stored TOML and stay per-provider editable. The unified-session-history
+    /// injection and the official proxy takeover route are NOT governed by
+    /// this flag (the field is load-bearing there).
+    #[serde(default = "default_true")]
+    pub codex_default_requires_openai_auth: bool,
     /// User opted in (via the enable dialog checkbox) to migrate existing
     /// official sessions ("openai" bucket) into the shared bucket. Persisted so
     /// a failed migration retries at startup; cleared when the toggle turns off.
@@ -531,6 +541,7 @@ impl Default for AppSettings {
             show_profile_switcher: true,
             preserve_codex_official_auth_on_switch: false,
             unify_codex_session_history: false,
+            codex_default_requires_openai_auth: true,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
             first_run_notice_confirmed: None,
@@ -964,6 +975,19 @@ pub fn unify_codex_session_history() -> bool {
         .unify_codex_session_history
 }
 
+/// 新生成的第三方 Codex 配置是否默认包含 `requires_openai_auth = true`。
+/// 默认 true（保持既有行为）；仅影响生成时默认值，不回写已保存的供应商，
+/// 也不影响统一会话注入 / 官方代理接管路由（那里该字段是功能必需的）。
+pub fn codex_default_requires_openai_auth() -> bool {
+    settings_store()
+        .read()
+        .unwrap_or_else(|e| {
+            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            e.into_inner()
+        })
+        .codex_default_requires_openai_auth
+}
+
 /// 「使用自定义 API 时不依赖 ChatGPT 官方额度」开关。
 ///
 /// 开启后，Codex 转发候选链在存在非官方 provider 时剔除内置官方 Codex，
@@ -1171,6 +1195,72 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::env;
+    use tempfile::TempDir;
+
+    /// Pin ambient `AppSettings` for a test: point HOME/USERPROFILE/
+    /// CC_SWITCH_TEST_HOME at a fresh temp dir, write the given settings.json
+    /// there, and reload the global settings store. Restores the env vars and
+    /// reloads the store on drop. Must be used with `#[serial_test::serial]`
+    /// because the settings store and env vars are process-global.
+    pub(crate) struct AmbientSettings {
+        #[allow(dead_code)]
+        dir: TempDir,
+        original_home: Option<String>,
+        original_userprofile: Option<String>,
+        original_test_home: Option<String>,
+    }
+
+    impl AmbientSettings {
+        pub(crate) fn pin(settings_json: &str) -> Self {
+            let dir = TempDir::new().expect("failed to create temp home");
+            let original_home = env::var("HOME").ok();
+            let original_userprofile = env::var("USERPROFILE").ok();
+            let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
+
+            env::set_var("HOME", dir.path());
+            env::set_var("USERPROFILE", dir.path());
+            env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+
+            let cc_dir = dir.path().join(".cc-switch");
+            std::fs::create_dir_all(&cc_dir).expect("create .cc-switch dir");
+            std::fs::write(cc_dir.join("settings.json"), settings_json)
+                .expect("write settings.json");
+            super::reload_settings().expect("reload settings");
+
+            Self {
+                dir,
+                original_home,
+                original_userprofile,
+                original_test_home,
+            }
+        }
+    }
+
+    impl Drop for AmbientSettings {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => env::set_var("HOME", value),
+                None => env::remove_var("HOME"),
+            }
+
+            match &self.original_userprofile {
+                Some(value) => env::set_var("USERPROFILE", value),
+                None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_test_home {
+                Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+
+            let _ = super::reload_settings();
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_config::AppType;
@@ -1204,5 +1294,26 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn codex_default_requires_openai_auth_defaults_to_true() {
+        // 旧版 settings.json 没有该键：反序列化必须回落到 true（零行为变化）
+        let settings: AppSettings = serde_json::from_str("{}").expect("parse empty settings");
+        assert!(settings.codex_default_requires_openai_auth);
+        assert!(AppSettings::default().codex_default_requires_openai_auth);
+    }
+
+    #[test]
+    fn codex_default_requires_openai_auth_round_trips() {
+        let settings = AppSettings {
+            codex_default_requires_openai_auth: false,
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        assert!(json.contains("\"codexDefaultRequiresOpenaiAuth\":false"));
+
+        let parsed: AppSettings = serde_json::from_str(&json).expect("parse settings");
+        assert!(!parsed.codex_default_requires_openai_auth);
     }
 }

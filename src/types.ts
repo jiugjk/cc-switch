@@ -374,6 +374,11 @@ export interface Settings {
   // Run official Codex under the shared "custom" provider id so future
   // sessions share one resume-history bucket with third-party providers
   unifyCodexSessionHistory?: boolean;
+  // Include `requires_openai_auth = true` in newly generated third-party
+  // Codex configs (presets/templates/universal sync/deeplink). Defaults to
+  // true; does not affect already-saved providers or the official
+  // unified-session / proxy-takeover injections.
+  codexDefaultRequiresOpenaiAuth?: boolean;
   // User opted in (enable dialog checkbox) to migrate existing official sessions
   unifyCodexMigrateExisting?: boolean;
   // User has confirmed the failover toggle first-run notice

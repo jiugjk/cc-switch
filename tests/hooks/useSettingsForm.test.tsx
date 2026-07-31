@@ -51,11 +51,68 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
+    expect(settings.codexDefaultRequiresOpenaiAuth).toBe(true);
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
     expect(result.current.initialLanguage).toBe("en");
     expect(changeLanguageSpy).toHaveBeenCalledWith("en");
+  });
+
+  it("should map codexDefaultRequiresOpenaiAuth with a true default in all normalization sites", async () => {
+    // 初始化：服务端显式 false 必须透传
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        codexDefaultRequiresOpenaiAuth: false,
+        language: "en",
+      },
+      isLoading: false,
+    });
+
+    const { result } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings).not.toBeNull();
+    });
+    expect(result.current.settings!.codexDefaultRequiresOpenaiAuth).toBe(false);
+
+    // resetSettings：缺失键回落到 true
+    act(() => {
+      result.current.resetSettings({
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        language: "en",
+      });
+    });
+    expect(result.current.settings!.codexDefaultRequiresOpenaiAuth).toBe(true);
+
+    // resetSettings：显式 false 透传
+    act(() => {
+      result.current.resetSettings({
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        codexDefaultRequiresOpenaiAuth: false,
+        language: "en",
+      });
+    });
+    expect(result.current.settings!.codexDefaultRequiresOpenaiAuth).toBe(false);
+  });
+
+  it("should default codexDefaultRequiresOpenaiAuth to true in the updateSettings base state", () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: null,
+      isLoading: false,
+    });
+
+    const { result } = renderHook(() => useSettingsForm());
+
+    act(() => {
+      result.current.updateSettings({ showInTray: false });
+    });
+
+    expect(result.current.settings?.codexDefaultRequiresOpenaiAuth).toBe(true);
   });
 
   it("should support japanese language preference from server data", async () => {

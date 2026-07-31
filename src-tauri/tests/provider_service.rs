@@ -2386,14 +2386,32 @@ command = "ghost-cmd"
         !live_after.contains("sk-a-live-secret"),
         "provider A's bearer token must not leak into B's live, got: {live_after}"
     );
+    // live 里的 MCP 条目是用户数据：切换前会被回填进 DB（live 优先），
+    // 再由重投影以官方 [mcp_servers] 格式写回 B 的 live——而不是像历史
+    // 实现那样被整文件重写静默销毁。
     assert!(
-        !live_after.contains("mcp_servers"),
-        "no DB-enabled MCP servers, so live must not resurrect stale entries, got: {live_after}"
+        live_after.contains("[mcp_servers.echo]"),
+        "live MCP entries must survive the switch via backfill + reprojection, got: {live_after}"
     );
     assert!(
-        !live_after.contains("ghost-legacy"),
-        "the legacy [mcp.servers] orphan must not propagate to B's live, got: {live_after}"
+        live_after.contains("[mcp_servers.ghost-legacy]"),
+        "the legacy [mcp.servers] entry must be imported and re-projected in the official format, got: {live_after}"
     );
+    assert!(
+        !live_after.contains("[mcp.servers."),
+        "the broken legacy [mcp.servers] format must not propagate to B's live, got: {live_after}"
+    );
+    let mcp_servers = state.db.get_all_mcp_servers().expect("read mcp servers");
+    for id in ["echo", "ghost-legacy"] {
+        let row = mcp_servers
+            .get(id)
+            .unwrap_or_else(|| panic!("live-only MCP server '{id}' should be backfilled into DB"));
+        assert!(
+            row.apps.codex,
+            "backfilled server '{id}' should be enabled for Codex only"
+        );
+        assert!(!row.apps.claude && !row.apps.grokbuild);
+    }
     assert!(
         !live_after.contains("wire_api = \"chat\""),
         "provider A's top-level wire_api must not rewrite B's protocol, got: {live_after}"
@@ -2948,5 +2966,278 @@ fn recover_from_crash_without_backup_cleans_placeholder_instead_of_writing_it_ba
             .map(|url| !url.starts_with("http://127.0.0.1"))
             .unwrap_or(true),
         "recovery must drop the local proxy base URL"
+    );
+}
+
+/// Regression: switching Codex providers must never revert a freshly refreshed
+/// ChatGPT login (`codex login`) to a stale DB snapshot. Live `auth.json` is
+/// authoritative for the login cache — on switch-in the fresher live tokens
+/// win over the target's stored snapshot, and the fresh tokens are fanned out
+/// into every same-account OAuth provider row so stale (possibly revoked)
+/// refresh tokens stop accumulating in the DB.
+#[test]
+fn provider_service_switch_codex_never_downgrades_fresher_live_oauth_login() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let stale_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "stale-access",
+            "refresh_token": "stale-refresh",
+            "account_id": "acct-1"
+        },
+        "last_refresh": "2026-01-01T00:00:00Z"
+    });
+    let fresh_live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "fresh-access",
+            "refresh_token": "fresh-refresh",
+            "account_id": "acct-1"
+        },
+        "last_refresh": "2026-07-01T00:00:00Z"
+    });
+    // A fresh `codex login` refreshed the live login after both DB snapshots
+    // were captured.
+    write_codex_live_atomic(&fresh_live_auth, Some("")).expect("seed fresh live login");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "official-a".to_string();
+
+        let mut official_a = Provider::with_id(
+            "official-a".to_string(),
+            "Official A".to_string(),
+            json!({ "auth": stale_auth, "config": "" }),
+            None,
+        );
+        official_a.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-a".to_string(), official_a);
+
+        let mut official_b = Provider::with_id(
+            "official-b".to_string(),
+            "Official B".to_string(),
+            json!({ "auth": stale_auth, "config": "" }),
+            None,
+        );
+        official_b.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-b".to_string(), official_b);
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::Codex, "official-b")
+        .expect("switch to official B should succeed");
+
+    let live_auth: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read live auth.json");
+    assert_eq!(
+        live_auth
+            .pointer("/tokens/access_token")
+            .and_then(|v| v.as_str()),
+        Some("fresh-access"),
+        "switch-in must not downgrade the fresher live OAuth login to the stale snapshot"
+    );
+    assert_eq!(
+        live_auth
+            .pointer("/tokens/refresh_token")
+            .and_then(|v| v.as_str()),
+        Some("fresh-refresh"),
+        "the rotated (fresh) refresh token must survive the switch"
+    );
+    assert_eq!(
+        live_auth.get("last_refresh").and_then(|v| v.as_str()),
+        Some("2026-07-01T00:00:00Z"),
+        "live last_refresh must keep the fresher timestamp"
+    );
+
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after switch");
+    for provider_id in ["official-a", "official-b"] {
+        let stored = providers.get(provider_id).expect("provider exists");
+        assert_eq!(
+            stored
+                .settings_config
+                .pointer("/auth/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("fresh-access"),
+            "{provider_id} DB row should converge to the fresh live tokens"
+        );
+        assert_eq!(
+            stored
+                .settings_config
+                .pointer("/auth/last_refresh")
+                .and_then(|v| v.as_str()),
+            Some("2026-07-01T00:00:00Z"),
+            "{provider_id} DB row should carry the fresh last_refresh"
+        );
+    }
+}
+
+/// The OAuth fan-out must respect the multi-account gate: a stored row holding
+/// a different ChatGPT account keeps its own tokens, and switching into it
+/// keeps snapshot-wins semantics (deliberate multi-account setup).
+#[test]
+fn provider_service_switch_codex_fanout_skips_other_account_rows() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let fresh_live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "fresh-access",
+            "account_id": "acct-live"
+        },
+        "last_refresh": "2026-07-01T00:00:00Z"
+    });
+    write_codex_live_atomic(&fresh_live_auth, Some("")).expect("seed fresh live login");
+
+    let other_account_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "other-access",
+            "account_id": "acct-other"
+        },
+        "last_refresh": "2026-01-01T00:00:00Z"
+    });
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "official-live".to_string();
+
+        let mut official_live = Provider::with_id(
+            "official-live".to_string(),
+            "Official Live".to_string(),
+            json!({ "auth": fresh_live_auth, "config": "" }),
+            None,
+        );
+        official_live.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-live".to_string(), official_live);
+
+        let mut official_other = Provider::with_id(
+            "official-other".to_string(),
+            "Official Other Account".to_string(),
+            json!({ "auth": other_account_auth, "config": "" }),
+            None,
+        );
+        official_other.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-other".to_string(), official_other);
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::Codex, "official-other")
+        .expect("switch to the other-account provider should succeed");
+
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after switch");
+    assert_eq!(
+        providers
+            .get("official-other")
+            .expect("other-account provider exists")
+            .settings_config
+            .pointer("/auth/tokens/access_token")
+            .and_then(|v| v.as_str()),
+        Some("other-access"),
+        "fan-out must not merge tokens across different ChatGPT accounts"
+    );
+
+    let live_auth: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read live auth.json");
+    assert_eq!(
+        live_auth
+            .pointer("/tokens/access_token")
+            .and_then(|v| v.as_str()),
+        Some("other-access"),
+        "switching into a different account keeps snapshot-wins semantics"
+    );
+}
+
+/// A temporarily unreadable live config (e.g. invalid config.toml) used to
+/// skip the pre-switch backfill silently, dropping a fresh login. The switch
+/// must still succeed but surface the skipped backfill as a warning.
+#[test]
+fn provider_service_switch_codex_warns_when_live_settings_unreadable() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    std::fs::create_dir_all(auth_path.parent().expect("codex dir")).expect("create codex dir");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string_pretty(&json!({ "OPENAI_API_KEY": "live-key" }))
+            .expect("serialize auth"),
+    )
+    .expect("seed live auth.json");
+    std::fs::write(
+        cc_switch_lib::get_codex_config_path(),
+        "model_provider = [ this is not valid toml",
+    )
+    .expect("seed broken config.toml");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({ "auth": {"OPENAI_API_KEY": "old-key"}, "config": "" }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({ "auth": {"OPENAI_API_KEY": "new-key"}, "config": "" }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    let result = ProviderService::switch(&state, AppType::Codex, "new-provider")
+        .expect("switch should still succeed when live settings are unreadable");
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning == "backfill_live_read_failed:old-provider"),
+        "unreadable live settings must surface as a switch warning, got: {:?}",
+        result.warnings
     );
 }

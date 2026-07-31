@@ -405,6 +405,108 @@ pub fn codex_auth_has_oauth_login_material(auth: &Value) -> bool {
     })
 }
 
+/// Parse a Codex `auth.json` `last_refresh` timestamp (RFC 3339, same format
+/// Codex CLI writes). Missing or unparsable values return `None`, which the
+/// freshness comparison treats as "oldest".
+fn parse_codex_last_refresh(auth: &Value) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    auth.get("last_refresh")
+        .and_then(|value| value.as_str())
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text.trim()).ok())
+}
+
+/// Extract a non-empty `tokens.account_id` from a Codex auth value.
+fn codex_auth_account_id(auth: &Value) -> Option<&str> {
+    auth.pointer("/tokens/account_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// Merge a fresher live ChatGPT OAuth login into `base_auth`.
+///
+/// Returns `Some(merged)` only when all of the following hold:
+/// - both sides are OAuth-shaped (`codex_auth_has_oauth_login_material`);
+/// - both sides belong to the same account: `tokens.account_id` equal, or
+///   absent on BOTH sides. Absent on one side only counts as "unknown
+///   account" and skips the merge (multi-account safety);
+/// - live `last_refresh` is at least as fresh as the base's. Missing or
+///   unparsable timestamps sort oldest, so when both sides lack
+///   `last_refresh` live still wins (never downgrade).
+///
+/// The merge replaces `tokens` wholesale plus `last_refresh` / `auth_mode`
+/// from live when present there — no field-level merge inside `tokens`, so a
+/// rotated refresh token never mixes with stale sibling fields. All other
+/// base keys (e.g. `OPENAI_API_KEY: null`) are kept as-is. Returns `None`
+/// when the base side must stay untouched.
+pub fn merge_fresher_live_codex_oauth(base_auth: &Value, live_auth: &Value) -> Option<Value> {
+    if !codex_auth_has_oauth_login_material(base_auth)
+        || !codex_auth_has_oauth_login_material(live_auth)
+    {
+        return None;
+    }
+
+    match (
+        codex_auth_account_id(base_auth),
+        codex_auth_account_id(live_auth),
+    ) {
+        (Some(base_id), Some(live_id)) if base_id == live_id => {}
+        (None, None) => {}
+        _ => return None,
+    }
+
+    // `None < Some(_)`: a side without a parsable `last_refresh` is oldest,
+    // so live wins ties and the both-missing case (never downgrade).
+    if parse_codex_last_refresh(live_auth) < parse_codex_last_refresh(base_auth) {
+        return None;
+    }
+
+    let mut merged = base_auth.clone();
+    let obj = merged.as_object_mut()?;
+    for key in ["tokens", "last_refresh", "auth_mode"] {
+        if let Some(value) = live_auth.get(key) {
+            obj.insert(key.to_string(), value.clone());
+        }
+    }
+    Some(merged)
+}
+
+/// Never downgrade the live ChatGPT OAuth login when writing a provider
+/// snapshot to `~/.codex/auth.json`.
+///
+/// Provider rows store `auth` as a point-in-time projection of the login
+/// cache. OpenAI rotates refresh tokens, so wholesale-writing a stale
+/// snapshot over a freshly refreshed login (`codex login`) can leave a
+/// revoked refresh token behind, killing the login. Live `auth.json` is
+/// authoritative for the ChatGPT login cache: when both snapshot and live
+/// carry OAuth material for the same account and live's `last_refresh` is at
+/// least as fresh, the live `tokens` / `last_refresh` / `auth_mode` are
+/// carried into the written value (see [`merge_fresher_live_codex_oauth`]).
+///
+/// The snapshot passes through unchanged when it is an API-key snapshot
+/// (`OPENAI_API_KEY` set, including the `PROXY_MANAGED` placeholder), when it
+/// is not OAuth-shaped, or when live `auth.json` is missing, unreadable, or
+/// not OAuth-shaped — a live read failure must never turn into a write
+/// failure, and this function never resurrects a deleted `auth.json` (the
+/// caller decides whether to write at all).
+pub fn merge_codex_oauth_auth_preferring_fresher_live(snapshot_auth: &Value) -> Value {
+    if extract_codex_auth_api_key(snapshot_auth).is_some()
+        || !codex_auth_has_oauth_login_material(snapshot_auth)
+    {
+        return snapshot_auth.clone();
+    }
+
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return snapshot_auth.clone();
+    }
+    let Ok(live_auth) = read_json_file::<Value>(&auth_path) else {
+        return snapshot_auth.clone();
+    };
+
+    merge_fresher_live_codex_oauth(snapshot_auth, &live_auth)
+        .unwrap_or_else(|| snapshot_auth.clone())
+}
+
 pub fn should_restore_codex_provider_token_for_backfill(
     category: Option<&str>,
     template_settings: &Value,
@@ -1657,6 +1759,10 @@ pub fn strip_codex_unified_session_bucket_from_settings(
 /// `[mcp_servers]` 只是每次写 live 之后由 MCP 同步重新投影的产物。若回填时
 /// 烙进供应商存储配置，已在应用里删除的服务器会随下次激活该供应商被写回
 /// live，而逐条 reconcile 只认识 DB 现存条目、永远清不掉这种孤儿。
+///
+/// 剥离不会丢用户数据：切换/保存路径在重写 live 前已先经
+/// `McpService::backfill_live_edits_for_app` 把 live 里的 `[mcp_servers.*]`
+/// 手工编辑回填进 DB，此处只负责防止孤儿随供应商快照复活。
 pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(), AppError> {
     let Some(config_text) = settings
         .get("config")
@@ -1717,7 +1823,11 @@ pub fn write_codex_live_for_provider(
             && !crate::settings::preserve_codex_official_auth_on_switch());
 
     if should_write_auth {
-        write_codex_live_atomic(auth, config_text)
+        // Snapshot auth may be a stale projection of the ChatGPT login cache;
+        // never let it downgrade a fresher live OAuth login (rotated refresh
+        // tokens are revoked upstream, so a stale write kills the login).
+        let auth = merge_codex_oauth_auth_preferring_fresher_live(auth);
+        write_codex_live_atomic(&auth, config_text)
     } else {
         let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
         write_codex_live_config_atomic(Some(&live_config))
@@ -1803,7 +1913,8 @@ pub fn restore_codex_settings_for_backfill(
 ///   otherwise falls back to top-level `base_url`.
 /// - `"wire_api"`: writes to `[model_providers.<current>].wire_api` if `model_provider` exists,
 ///   otherwise falls back to top-level `wire_api`.
-/// - `"model"` / `"model_catalog_json"`: writes to top-level field.
+/// - `"model"` / `"model_catalog_json"` / `"model_reasoning_effort"`: writes to
+///   top-level field.
 ///
 /// Empty value removes the field.
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
@@ -1850,7 +1961,7 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                 doc[field] = toml_edit::value(trimmed);
             }
         }
-        "model" | "model_catalog_json" => {
+        "model" | "model_catalog_json" | "model_reasoning_effort" => {
             if trimmed.is_empty() {
                 doc.as_table_mut().remove(field);
             } else {
@@ -1961,6 +2072,31 @@ mod tests {
             custom.get("wire_api").and_then(|v| v.as_str()),
             Some("responses")
         );
+    }
+
+    // 回归保护：统一会话注入不受 codexDefaultRequiresOpenaiAuth 设置影响——
+    // 该字段在官方注入路径是功能必需的（路由 auth.json 的 ChatGPT 登录），
+    // 且 strip 往返依赖注入表的精确形状。
+    #[test]
+    #[serial_test::serial]
+    fn unified_session_bucket_injection_ignores_requires_openai_auth_setting() {
+        let _settings = crate::settings::test_support::AmbientSettings::pin(
+            r#"{"codexDefaultRequiresOpenaiAuth": false, "unifyCodexSessionHistory": true}"#,
+        );
+
+        let injected = inject_codex_unified_session_bucket("").expect("inject");
+        let doc: toml::Table = toml::from_str(&injected).expect("parse injected config");
+        let custom = doc["model_providers"][CC_SWITCH_CODEX_MODEL_PROVIDER_ID]
+            .as_table()
+            .expect("custom provider table");
+        assert_eq!(
+            custom.get("requires_openai_auth").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        // strip 往返仍然干净
+        let stripped = strip_codex_unified_session_bucket(&injected).expect("strip");
+        assert_eq!(stripped.trim(), "");
     }
 
     #[test]
@@ -2549,6 +2685,46 @@ name = "any"
         let result2 = update_codex_toml_field(&result, "model", "").unwrap();
         let parsed2: toml::Value = toml::from_str(&result2).unwrap();
         assert!(parsed2.get("model").is_none());
+    }
+
+    #[test]
+    fn model_reasoning_effort_field_operates_on_top_level() {
+        let input = r#"model_provider = "any"
+model = "gpt-4"
+
+[model_providers.any]
+name = "any"
+"#;
+
+        // Set
+        let result = update_codex_toml_field(input, "model_reasoning_effort", "high").unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(|v| v.as_str()),
+            Some("high")
+        );
+        assert!(parsed
+            .get("model_providers")
+            .and_then(|v| v.get("any"))
+            .and_then(|v| v.get("model_reasoning_effort"))
+            .is_none());
+
+        // Replace
+        let result2 = update_codex_toml_field(&result, "model_reasoning_effort", "low").unwrap();
+        let parsed2: toml::Value = toml::from_str(&result2).unwrap();
+        assert_eq!(
+            parsed2
+                .get("model_reasoning_effort")
+                .and_then(|v| v.as_str()),
+            Some("low")
+        );
+
+        // Remove on empty value
+        let result3 = update_codex_toml_field(&result2, "model_reasoning_effort", "").unwrap();
+        let parsed3: toml::Value = toml::from_str(&result3).unwrap();
+        assert!(parsed3.get("model_reasoning_effort").is_none());
     }
 
     #[test]
@@ -3492,6 +3668,179 @@ model_catalog_json = "cc-switch-model-catalog.json"
         assert!(
             parsed.get("model_catalog_json").is_none(),
             "None arm should remove relative cc-switch-owned field"
+        );
+    }
+
+    fn oauth_auth(
+        access_token: &str,
+        account_id: Option<&str>,
+        last_refresh: Option<&str>,
+    ) -> Value {
+        let mut tokens = serde_json::Map::new();
+        tokens.insert("access_token".to_string(), json!(access_token));
+        tokens.insert(
+            "refresh_token".to_string(),
+            json!(format!("{access_token}-refresh")),
+        );
+        if let Some(account_id) = account_id {
+            tokens.insert("account_id".to_string(), json!(account_id));
+        }
+        let mut auth = serde_json::Map::new();
+        auth.insert("auth_mode".to_string(), json!("chatgpt"));
+        auth.insert("OPENAI_API_KEY".to_string(), Value::Null);
+        auth.insert("tokens".to_string(), Value::Object(tokens));
+        if let Some(last_refresh) = last_refresh {
+            auth.insert("last_refresh".to_string(), json!(last_refresh));
+        }
+        Value::Object(auth)
+    }
+
+    #[test]
+    fn merge_fresher_live_codex_oauth_prefers_fresher_live_tokens() {
+        let mut snapshot = oauth_auth("stale", Some("acct-1"), Some("2026-01-01T00:00:00Z"));
+        // Extra stale token field must NOT survive: tokens is replaced wholesale.
+        snapshot
+            .pointer_mut("/tokens")
+            .and_then(Value::as_object_mut)
+            .expect("snapshot tokens object")
+            .insert("id_token".to_string(), json!("stale-id"));
+        let live = oauth_auth("fresh", Some("acct-1"), Some("2026-07-01T00:00:00Z"));
+
+        let merged =
+            merge_fresher_live_codex_oauth(&snapshot, &live).expect("fresher live should merge");
+        assert_eq!(
+            merged.get("tokens"),
+            live.get("tokens"),
+            "tokens replaced wholesale"
+        );
+        assert!(
+            merged.pointer("/tokens/id_token").is_none(),
+            "stale token fields must not be field-merged into the fresh tokens"
+        );
+        assert_eq!(
+            merged.get("last_refresh").and_then(|v| v.as_str()),
+            Some("2026-07-01T00:00:00Z")
+        );
+        assert!(
+            merged.get("OPENAI_API_KEY").is_some_and(|v| v.is_null()),
+            "non-OAuth snapshot keys stay untouched"
+        );
+    }
+
+    #[test]
+    fn merge_fresher_live_codex_oauth_keeps_snapshot_when_snapshot_fresher() {
+        let snapshot = oauth_auth("newer", Some("acct-1"), Some("2026-07-01T00:00:00Z"));
+        let live = oauth_auth("older", Some("acct-1"), Some("2026-01-01T00:00:00Z"));
+        assert!(
+            merge_fresher_live_codex_oauth(&snapshot, &live).is_none(),
+            "a fresher snapshot must win over an older live login"
+        );
+
+        // Snapshot with last_refresh vs live without one: snapshot wins too
+        // (missing/unparsable sorts oldest).
+        let live_no_refresh = oauth_auth("older", Some("acct-1"), None);
+        assert!(merge_fresher_live_codex_oauth(&snapshot, &live_no_refresh).is_none());
+    }
+
+    #[test]
+    fn merge_fresher_live_codex_oauth_live_wins_when_both_missing_last_refresh() {
+        // Explicit invariant: when neither side carries a comparable
+        // last_refresh, live wins (never downgrade the live login). This also
+        // covers explicit UI edits that paste tokens without last_refresh into
+        // the current provider — live overrides them on write.
+        let snapshot = oauth_auth("pasted", Some("acct-1"), None);
+        let live = oauth_auth("live", Some("acct-1"), None);
+        let merged = merge_fresher_live_codex_oauth(&snapshot, &live)
+            .expect("both-missing last_refresh should let live win");
+        assert_eq!(
+            merged
+                .pointer("/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("live")
+        );
+
+        // Snapshot without last_refresh vs live with one: live wins as well.
+        let live_with_refresh = oauth_auth("live", Some("acct-1"), Some("2026-07-01T00:00:00Z"));
+        let merged = merge_fresher_live_codex_oauth(&snapshot, &live_with_refresh)
+            .expect("live with last_refresh beats snapshot without");
+        assert_eq!(
+            merged.get("last_refresh").and_then(|v| v.as_str()),
+            Some("2026-07-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn merge_fresher_live_codex_oauth_skips_mismatched_or_one_sided_account_id() {
+        let live = oauth_auth("fresh", Some("acct-live"), Some("2026-07-01T00:00:00Z"));
+
+        // Different account: deliberate multi-account setup, never merged.
+        let other_account = oauth_auth("stale", Some("acct-other"), Some("2026-01-01T00:00:00Z"));
+        assert!(merge_fresher_live_codex_oauth(&other_account, &live).is_none());
+
+        // account_id absent on one side only: unknown account, skip merge.
+        let no_account = oauth_auth("stale", None, Some("2026-01-01T00:00:00Z"));
+        assert!(merge_fresher_live_codex_oauth(&no_account, &live).is_none());
+        let live_no_account = oauth_auth("fresh", None, Some("2026-07-01T00:00:00Z"));
+        let with_account = oauth_auth("stale", Some("acct-1"), Some("2026-01-01T00:00:00Z"));
+        assert!(merge_fresher_live_codex_oauth(&with_account, &live_no_account).is_none());
+
+        // Same account merges.
+        let same_account = oauth_auth("stale", Some("acct-live"), Some("2026-01-01T00:00:00Z"));
+        assert!(merge_fresher_live_codex_oauth(&same_account, &live).is_some());
+    }
+
+    #[test]
+    fn merge_fresher_live_codex_oauth_requires_oauth_shape_on_both_sides() {
+        let live = oauth_auth("fresh", Some("acct-1"), Some("2026-07-01T00:00:00Z"));
+
+        assert!(
+            merge_fresher_live_codex_oauth(&json!({"OPENAI_API_KEY": "sk-key"}), &live).is_none(),
+            "API-key-only rows are not OAuth-shaped and never receive tokens"
+        );
+        assert!(
+            merge_fresher_live_codex_oauth(&json!({}), &live).is_none(),
+            "empty official rows (login without auth write) stay empty"
+        );
+        let snapshot = oauth_auth("stale", Some("acct-1"), Some("2026-01-01T00:00:00Z"));
+        assert!(
+            merge_fresher_live_codex_oauth(&snapshot, &json!({"OPENAI_API_KEY": "sk-live"}))
+                .is_none(),
+            "a non-OAuth live auth.json must not clobber snapshot OAuth material"
+        );
+    }
+
+    #[test]
+    fn merge_codex_oauth_auth_wrapper_passes_through_non_oauth_snapshots() {
+        // These gates short-circuit before any live auth.json read, so they are
+        // safe to assert without a test HOME.
+        let api_key_snapshot = json!({"OPENAI_API_KEY": "sk-third-party"});
+        assert_eq!(
+            merge_codex_oauth_auth_preferring_fresher_live(&api_key_snapshot),
+            api_key_snapshot,
+            "API-key snapshots keep the legacy overwrite semantics"
+        );
+
+        let placeholder = json!({"OPENAI_API_KEY": "PROXY_MANAGED"});
+        assert_eq!(
+            merge_codex_oauth_auth_preferring_fresher_live(&placeholder),
+            placeholder,
+            "the takeover placeholder must pass through untouched"
+        );
+
+        // API key alongside OAuth material still counts as an API-key snapshot.
+        let mixed = json!({
+            "OPENAI_API_KEY": "sk-key",
+            "tokens": {"access_token": "tok", "account_id": "acct"}
+        });
+        assert_eq!(
+            merge_codex_oauth_auth_preferring_fresher_live(&mixed),
+            mixed
+        );
+
+        let empty = json!({});
+        assert_eq!(
+            merge_codex_oauth_auth_preferring_fresher_live(&empty),
+            empty
         );
     }
 }

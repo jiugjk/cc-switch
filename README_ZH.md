@@ -97,7 +97,7 @@
 
 - **云同步** — 自定义配置目录（Dropbox、OneDrive、iCloud、坚果云、NAS）及 WebDAV 服务器同步
 - **Deep Link** (`ccswitch://`) — 通过 URL 一键导入供应商、MCP 服务器、提示词和技能
-- 深色 / 浅色 / 跟随系统主题、开机自启、自动更新、原子写入、自动备份、国际化（简中/繁中/英/日）
+- 深色 / 浅色 / 跟随系统主题、开机自启、原子写入、自动备份、国际化（简中/繁中/英/日）
 
 ## 常见问题
 
@@ -211,7 +211,7 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 > **说明**
 > - **未代码签名**：Windows SmartScreen 可能提示，选「仍要运行」即可。
-> - **无自动更新通道**：构建关闭了 `createUpdaterArtifacts`（无签名密钥）。
+> - **无自动更新通道**：本 fork 已移除应用内更新器（`createUpdaterArtifacts` 为 false、无 `plugins.updater` 配置、无签名密钥），「检查更新」会打开本 fork 的发布页手动下载。
 > - 标签形如 `v3.17.0-fork.<run_number>`，并指向实际构建的提交。
 
 <details>
@@ -344,7 +344,7 @@ pnpm test:unit --coverage
 
 **前端**：React 18 · TypeScript · Vite · TailwindCSS 3.4 · TanStack Query v5 · react-i18next · react-hook-form · zod · shadcn/ui · @dnd-kit
 
-**后端**：Tauri 2.8 · Rust · serde · tokio · thiserror · tauri-plugin-updater/process/dialog/store/log
+**后端**：Tauri 2.8 · Rust · serde · tokio · thiserror · tauri-plugin-process/dialog/store/log
 
 **测试**：vitest · MSW · @testing-library/react
 

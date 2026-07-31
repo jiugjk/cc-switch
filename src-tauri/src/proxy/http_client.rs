@@ -340,6 +340,52 @@ pub fn mask_url(url: &str) -> String {
     }
 }
 
+/// 请求日志用的 URL 脱敏：保留 scheme/host/port/path（Gemini 的 model 与
+/// method 编码在 path 中，是排障关键信号），丢弃 userinfo；query 保留参数名、
+/// 掩盖参数值（`***`），仅少数已知无害的路由参数保留明文（如 `alt=sse`）。
+/// 解析失败时回退到 [`mask_url`] 的多字节安全截断。
+pub fn sanitize_url_for_log(url: &str) -> String {
+    /// 已知无害、对排障有用的 query 参数（保留明文值）
+    const QUERY_VALUE_ALLOWLIST: [&str; 4] = ["alt", "beta", "stream", "api-version"];
+
+    let Ok(parsed) = url::Url::parse(url) else {
+        return mask_url(url);
+    };
+
+    let host = parsed.host_str().unwrap_or("?");
+    let mut sanitized = match parsed.port() {
+        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        None => format!("{}://{}", parsed.scheme(), host),
+    };
+    sanitized.push_str(parsed.path());
+
+    if let Some(query) = parsed.query() {
+        if !query.is_empty() {
+            let masked_pairs: Vec<String> = query
+                .split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some((name, value)) => {
+                        if QUERY_VALUE_ALLOWLIST
+                            .iter()
+                            .any(|allowed| name.eq_ignore_ascii_case(allowed))
+                        {
+                            format!("{name}={value}")
+                        } else {
+                            format!("{name}=***")
+                        }
+                    }
+                    // 无值参数（如 ?flag）原样保留
+                    None => pair.to_string(),
+                })
+                .collect();
+            sanitized.push('?');
+            sanitized.push_str(&masked_pairs.join("&"));
+        }
+    }
+
+    sanitized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +431,60 @@ mod tests {
 
         // 短的多字节串（不超过 20 字节）原样返回
         assert_eq!(mask_url("无效地址"), "无效地址");
+    }
+
+    #[test]
+    fn test_sanitize_url_for_log_masks_gemini_key_keeps_path_and_alt() {
+        let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=AIzaSecret";
+        let sanitized = sanitize_url_for_log(url);
+        assert_eq!(
+            sanitized,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=***"
+        );
+        assert!(!sanitized.contains("AIza"));
+    }
+
+    #[test]
+    fn test_sanitize_url_for_log_drops_userinfo_and_masks_values() {
+        assert_eq!(
+            sanitize_url_for_log("https://user:pass@relay.example:8443/api/v1/messages?token=abc"),
+            "https://relay.example:8443/api/v1/messages?token=***"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_url_for_log_keeps_url_without_query() {
+        assert_eq!(
+            sanitize_url_for_log("https://relay.example:8443/api/v1/messages"),
+            "https://relay.example:8443/api/v1/messages"
+        );
+        // 空 query 不输出 "?"
+        assert_eq!(
+            sanitize_url_for_log("https://relay.example/api/v1/messages?"),
+            "https://relay.example/api/v1/messages"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_url_for_log_multibyte_unparseable_falls_back_to_mask_url() {
+        // 与 test_mask_url_does_not_panic_on_multibyte_unparseable 相同的输入：
+        // 解析失败时应回退到 mask_url 的按字符截断，不 panic
+        let cjk = "这是一个无效的代理地址字符串";
+        assert_eq!(sanitize_url_for_log(cjk), mask_url(cjk));
+        assert_eq!(sanitize_url_for_log(cjk), "这是一个无效...");
+    }
+
+    #[test]
+    fn test_sanitize_url_for_log_preserves_order_and_valueless_params() {
+        assert_eq!(
+            sanitize_url_for_log("https://example.com/path?flag&key=x"),
+            "https://example.com/path?flag&key=***"
+        );
+        // 保序：allowlist 与被掩盖参数按原顺序输出
+        assert_eq!(
+            sanitize_url_for_log("https://example.com/path?key=x&alt=sse&other=y"),
+            "https://example.com/path?key=***&alt=sse&other=***"
+        );
     }
 
     #[test]

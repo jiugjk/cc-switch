@@ -426,6 +426,8 @@ wire_api = "responses"
 
 Every field has a purpose: `requires_openai_auth = true` keeps authentication going through the ChatGPT login in `auth.json`, with the base_url defaulting back to the official Codex backend; `name = "OpenAI"` lets Codex's official feature gates (web search, remote compaction, etc.) keep matching; `supports_websockets = true` restores the capability that custom entries lose by default; `wire_api = "responses"` uses the official responses protocol. **The net effect is: authentication is unchanged, only the bucket name changed.**
 
+> Note: the Settings toggle "Include requires_openai_auth in new Codex configs" does **not** affect this injection. That toggle only changes the generation-time default for new third-party configs; here the field is functionally required (it routes the ChatGPT login in auth.json), and the strip round-trip depends on the injected table's exact shape, so it is always written while this feature is on.
+
 **Key invariant: this injection can only exist in the live `config.toml`, and is never written into the database's stored configuration.** When you switch away from the official provider and write live back to the database, CC Switch strips this injection precisely (it strips only when the shape exactly matches the injected artifact; a third-party-customized `custom` table is kept as is). Precisely because of this, "turning off the switch + switching once" fully restores live, and the database always holds your original clean official configuration—this is the cornerstone of the whole switch's reversibility.
 
 ### 3. The two refusal gates for injection (corresponding to scenario C)
