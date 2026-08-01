@@ -58,7 +58,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version-file: ".node-version"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -134,21 +134,21 @@ jobs:
           echo "sha=${{ steps.rev.outputs.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload NSIS installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cc-switch-windows-x64-nsis-${{ steps.rev.outputs.sha }}
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
       - name: Upload MSI installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cc-switch-windows-x64-msi-${{ steps.rev.outputs.sha }}
           path: src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
 
       - name: Upload portable executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cc-switch-windows-x64-portable-${{ steps.rev.outputs.sha }}
           path: dist-release/CC-Switch-portable-x64.exe
@@ -165,7 +165,7 @@ jobs:
            github.event.workflow_run.head_repository.full_name == github.repository &&
            github.event.workflow_run.head_branch == 'main' &&
            github.event.workflow_run.conclusion == 'success')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.assets.outputs.tag }}
           name: ${{ steps.assets.outputs.tag }}
