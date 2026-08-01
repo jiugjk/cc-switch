@@ -3,8 +3,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AboutSection } from "@/components/settings/AboutSection";
 
-// F-001 回归：本 fork 已禁用应用内自动更新。「检查更新」按钮必须走
-// check_for_updates（打开 fork 发布页）的手动流程，绝不触发
+// F-001 回归：本发行版已禁用应用内自动更新。「检查更新」按钮必须走
+// check_for_updates（打开发行版发布页）的手动流程，绝不触发
 // install_update_and_restart（上游一键下载安装路径）。
 
 vi.mock("react-i18next", () => ({
@@ -52,7 +52,7 @@ function renderAboutSection() {
   );
 }
 
-describe("AboutSection check-for-updates (fork: manual flow only)", () => {
+describe("AboutSection check-for-updates (distribution: manual flow only)", () => {
   beforeEach(() => {
     checkUpdatesMock.mockClear();
     installUpdateAndRestartMock.mockClear();

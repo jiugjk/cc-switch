@@ -2,9 +2,11 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { UpdateProvider, useUpdate } from "@/contexts/UpdateContext";
 
-// F-001 回归：本 fork 已禁用应用内自动更新。UpdateProvider 不得在启动后自动
+// F-001 回归：本发行版已禁用应用内自动更新。UpdateProvider 不得在启动后自动
 // 触发更新检查（上游行为：挂载 1 秒后 checkUpdate），hasUpdate 恒为 false。
-const checkForUpdateMock = vi.fn(async () => ({ status: "up-to-date" as const }));
+const checkForUpdateMock = vi.fn(async () => ({
+  status: "up-to-date" as const,
+}));
 
 vi.mock("@/lib/updater", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/updater")>();
@@ -25,7 +27,7 @@ function Probe() {
   );
 }
 
-describe("UpdateContext (fork: auto-update disabled)", () => {
+describe("UpdateContext (distribution: auto-update disabled)", () => {
   it("does not auto-check for updates after startup delay", () => {
     vi.useFakeTimers();
     render(

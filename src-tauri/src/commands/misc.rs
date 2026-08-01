@@ -50,7 +50,7 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
     .map_err(|e| format!("剪贴板任务执行失败: {e}"))?
 }
 
-/// 检查更新：本 fork 无应用内自动更新通道，直接打开 fork 的发布页手动下载。
+/// 检查更新：本发行版无应用内自动更新通道，直接打开发布页手动下载。
 #[tauri::command]
 pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
     handle

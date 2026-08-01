@@ -424,3 +424,67 @@ pub async fn extract_common_config_snippet(
     crate::services::provider::ProviderService::extract_common_config_snippet(&state, app)
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn read_grok_global_config() -> Result<serde_json::Value, String> {
+    let location = crate::grok_config::get_grok_config_location();
+    let path = std::path::PathBuf::from(&location.path);
+    let exists = path.exists();
+    let content = if exists {
+        std::fs::read_to_string(&path).map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
+    crate::grok_config::validate_config_toml_syntax(&content).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "path": location.path,
+        "directory": location.directory,
+        "source": location.source,
+        "exists": exists,
+        "content": content,
+    }))
+}
+
+#[tauri::command]
+pub async fn write_grok_global_config(content: String) -> Result<(), String> {
+    crate::grok_config::write_grok_live_settings(&serde_json::json!({ "config": content }))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn merge_grok_profile_into_global_config(
+    profile_content: String,
+) -> Result<String, String> {
+    let path = crate::grok_config::get_grok_config_path();
+    let live = if path.exists() {
+        std::fs::read_to_string(&path).map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
+    let merged = crate::grok_config::merge_provider_profile_config_text(&live, &profile_content)
+        .map_err(|e| e.to_string())?;
+    crate::grok_config::write_grok_live_settings(&serde_json::json!({ "config": merged }))
+        .map_err(|e| e.to_string())?;
+    Ok(merged)
+}
+
+#[tauri::command]
+pub async fn preview_grok_privacy_protection(content: String) -> Result<String, String> {
+    crate::grok_config::apply_privacy_protection_config_text(&content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_grok_config_backups() -> Result<Vec<crate::grok_config::GrokConfigBackup>, String>
+{
+    crate::grok_config::list_grok_config_backups().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn restore_grok_config_backup(filename: String) -> Result<String, String> {
+    crate::grok_config::restore_grok_config_backup(&filename).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_grok_config_backup(filename: String) -> Result<bool, String> {
+    crate::grok_config::delete_grok_config_backup(&filename).map_err(|e| e.to_string())
+}

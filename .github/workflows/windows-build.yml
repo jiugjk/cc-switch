@@ -1,14 +1,14 @@
 name: Windows Build
 
-# Free automated Windows builds for the fork: no signing key or updater
+# Free automated Windows builds for this distribution: no signing key or updater
 # secrets required. Publishes only after CI succeeds for a push to main in
-# this same repo (or manual dispatch on main); CI runs chained from fork PRs
+# this same repo (or manual dispatch on main); CI runs chained from external PRs
 # never build or publish. Each successful publish creates
-# Release v{package.version}-fork.<run_number> with NSIS / MSI / portable.
+# Release v{package.version}-windows.<run_number> with NSIS / MSI / portable.
 on:
   workflow_dispatch:
   # Gate releases on green CI instead of racing a parallel push trigger.
-  # NOTE: this branches filter matches workflow_run.head_branch, which a fork
+  # NOTE: this branches filter matches workflow_run.head_branch, which an external
   # PR from a branch named "main" also satisfies — the job-level `if` below
   # additionally requires event=='push' and a same-repo head_repository.
   workflow_run:
@@ -30,7 +30,7 @@ jobs:
     runs-on: windows-2022
     # Manual: main only. Auto: only when the triggering CI run was a push to
     # main in THIS repo and succeeded. The event/head_repository guards reject
-    # fork-PR CI runs (a fork branch named "main" would otherwise satisfy the
+    # external-PR CI runs (a branch named "main" would otherwise satisfy the
     # head_branch check and run untrusted code with a write token).
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
@@ -94,7 +94,7 @@ jobs:
       - name: TypeScript type check
         run: pnpm typecheck
 
-      # tauri.conf.json already disables createUpdaterArtifacts (the fork has
+      # tauri.conf.json already disables createUpdaterArtifacts (this distribution has
       # no TAURI_SIGNING_PRIVATE_KEY and no update channel). Keep the inline
       # override as defense in depth against the flag being re-enabled.
       - name: Build Tauri app
@@ -130,7 +130,7 @@ jobs:
             exit 1
           fi
           VERSION=$(node -p "require('./package.json').version")
-          echo "tag=v${VERSION}-fork.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}-windows.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           echo "sha=${{ steps.rev.outputs.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload NSIS installer
@@ -156,7 +156,7 @@ jobs:
 
       - name: Create GitHub Release
         # Only main publishes: same-repo push via green CI, or dispatch on main.
-        # Same event/head_repository guards as the job-level if (fork-PR CI
+        # Same event/head_repository guards as the job-level if (external PR CI
         # runs must never reach a contents:write release step).
         if: >-
           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
@@ -173,17 +173,18 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            ## CC Switch fork — Windows 构建
+            ## CC Switch 独立 Windows 发行版
 
-            基于上游 [farion1231/cc-switch](https://github.com/farion1231/cc-switch) v3.17.0 的 fork 构建。
+            基于 MIT 许可的 [farion1231/cc-switch](https://github.com/farion1231/cc-switch) v3.19.1 独立维护与构建。
 
-            ### 本 fork 主要能力
+            ### 本发行版主要能力
 
             - **CodexCont**：原生 `/v1/responses` 推理截断自动续写（不绕过 `forward_with_retry`，不吞工具轮）
             - **路由可观测**：`ProxyStatus` last-route 字段 + 设置页摘要
             - **额度归因**：`quota_error` + `last_fallback_reason`；可选 `decouple_official_quota`
             - **能力解析**：声明/启发式 Provider 能力快照
             - **应用探测**：焦点重探测、MS Store Codex 桌面包
+            - **Grok Build 配置**：全局/供应商所有权分离、备份恢复、全模型代理接管
             - **Windows CI**：无签名 NSIS / MSI / 便携版（CI 绿后才发版）
 
             ### 安装包

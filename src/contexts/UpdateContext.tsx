@@ -115,7 +115,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(LEGACY_DISMISSED_KEY);
   }, []);
 
-  // 本 fork 已禁用应用内自动更新：不再于启动时自动检查（checkForUpdate 也
+  // 本发行版已禁用应用内自动更新：不再于启动时自动检查（checkForUpdate 也
   // 只是恒返回 up-to-date 的桩），hasUpdate 恒为 false，徽标/横幅不会出现。
 
   const value: UpdateContextValue = {

@@ -1,14 +1,35 @@
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::config::{get_home_dir, write_text_file};
+use crate::config::{get_app_config_dir, get_home_dir, write_text_file};
 use crate::error::AppError;
 use crate::provider::Provider;
 
 pub const DEFAULT_MODEL: &str = "grok-4.5";
 pub const DEFAULT_API_BACKEND: &str = "responses";
 pub const DEFAULT_CONTEXT_WINDOW: i64 = 500_000;
+const MAX_GROK_CONFIG_BACKUPS: usize = 10;
+const GROK_CONFIG_BACKUP_PREFIX: &str = "grok-config-";
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GrokConfigLocation {
+    pub path: String,
+    pub directory: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GrokConfigBackup {
+    pub filename: String,
+    pub path: String,
+    pub created_at: String,
+    pub size_bytes: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrokModelConfig {
@@ -22,14 +43,61 @@ pub struct GrokModelConfig {
     pub context_window: i64,
 }
 
-/// Grok Build configuration directory (`~/.grok`).
-pub fn get_grok_config_dir() -> PathBuf {
-    crate::settings::get_grok_override_dir().unwrap_or_else(|| get_home_dir().join(".grok"))
+fn non_empty_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
-/// Grok Build live configuration path (`~/.grok/config.toml`).
+fn absolute_environment_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+/// Resolve the Grok Build live configuration using the same environment
+/// contract as Grok-oriented tooling: an explicit `GROK_CONFIG` file wins,
+/// then `GROK_HOME`, then the CC Switch directory override, then `~/.grok`.
+pub fn get_grok_config_location() -> GrokConfigLocation {
+    let (path, source) = if let Some(path) = non_empty_env_path("GROK_CONFIG") {
+        (absolute_environment_path(path), "GROK_CONFIG")
+    } else if let Some(directory) = non_empty_env_path("GROK_HOME") {
+        (
+            absolute_environment_path(directory).join("config.toml"),
+            "GROK_HOME",
+        )
+    } else if let Some(directory) = crate::settings::get_grok_override_dir() {
+        (directory.join("config.toml"), "settings")
+    } else {
+        (get_home_dir().join(".grok").join("config.toml"), "default")
+    };
+    let directory = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    GrokConfigLocation {
+        path: path.to_string_lossy().to_string(),
+        directory: directory.to_string_lossy().to_string(),
+        source: source.to_string(),
+    }
+}
+
+/// Grok Build configuration directory.
+pub fn get_grok_config_dir() -> PathBuf {
+    PathBuf::from(get_grok_config_location().directory)
+}
+
+/// Grok Build live configuration path.
 pub fn get_grok_config_path() -> PathBuf {
-    get_grok_config_dir().join("config.toml")
+    PathBuf::from(get_grok_config_location().path)
+}
+
+pub fn get_grok_config_backup_dir() -> PathBuf {
+    get_app_config_dir().join("grok-config-backups")
 }
 
 fn required_non_empty_string<'a>(
@@ -82,17 +150,28 @@ pub fn validate_config_toml_syntax(config_toml: &str) -> Result<(), AppError> {
 
 /// Whether a live config document represents the official login state.
 ///
-/// 官方态 = 语法合法且完全没有自定义模型痕迹（无 `[models]` 也无 `[model.*]`，
-/// 允许 `[mcp_servers]` 等其它内容）。只要出现过任一自定义键就返回 false，
-/// 让残缺的自定义配置继续走 `validate_config_toml` 报出真实错误，
-/// 而不是被误判成官方态静默吞掉。语法不合法同样返回 false。
+/// 官方态 = 语法合法且没有任何 provider-owned 模型字段。允许 `[models]`
+/// 中的未来全局键和 `[mcp_servers]` 等其它内容，但 `models.default`、
+/// `models.web_search`、`endpoints.models_base_url`、`subagents` 或任一
+/// `[model.*]` 都表示自定义供应商态。语法不合法同样返回 false。
 pub fn is_official_live_config(config_toml: &str) -> bool {
     let Ok(document) = config_toml.parse::<toml::Value>() else {
         return false;
     };
-    document
-        .as_table()
-        .is_some_and(|root| !root.contains_key("models") && !root.contains_key("model"))
+    document.as_table().is_some_and(|root| {
+        let has_endpoint = root
+            .get("endpoints")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key("models_base_url"));
+        let has_model_selection = root
+            .get("models")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key("default") || table.contains_key("web_search"));
+        !has_endpoint
+            && !has_model_selection
+            && !root.contains_key("subagents")
+            && !root.contains_key("model")
+    })
 }
 
 /// Validate the provider-owned Grok Build TOML document.
@@ -171,6 +250,133 @@ pub fn validate_config_toml(config_toml: &str) -> Result<(), AppError> {
         })?;
 
     Ok(())
+}
+
+fn parse_edit_document(config_toml: &str) -> Result<toml_edit::DocumentMut, AppError> {
+    config_toml
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| {
+            AppError::localized(
+                "provider.grokbuild.config.invalid_toml",
+                format!("Grok Build config.toml 格式错误: {error}"),
+                format!("Invalid Grok Build config.toml: {error}"),
+            )
+        })
+}
+
+fn remove_table_key(document: &mut toml_edit::DocumentMut, section: &str, key: &str) {
+    let remove_section = document
+        .get_mut(section)
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .is_some_and(|table| {
+            table.remove(key);
+            table.is_empty()
+        });
+    if remove_section {
+        document.as_table_mut().remove(section);
+    }
+}
+
+fn remove_provider_owned_fields(document: &mut toml_edit::DocumentMut) {
+    remove_table_key(document, "endpoints", "models_base_url");
+    remove_table_key(document, "models", "default");
+    remove_table_key(document, "models", "web_search");
+    document.as_table_mut().remove("subagents");
+    document.as_table_mut().remove("model");
+}
+
+fn copy_table_key(
+    target: &mut toml_edit::DocumentMut,
+    source: &toml_edit::DocumentMut,
+    section: &str,
+    key: &str,
+) {
+    if let Some(item) = source.get(section).and_then(|item| item.get(key)) {
+        if target.get(section).is_none() {
+            target[section] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if let Some(table) = target
+            .get_mut(section)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        {
+            table.insert(key, item.clone());
+        }
+    }
+}
+
+/// Extract only the Grok provider profile from a full live config.
+///
+/// Provider snapshots own endpoint/model selection, subagent model selection,
+/// and complete `[model.*]` tables. Everything else remains live-global and is
+/// deliberately excluded so switches cannot pin telemetry, harness, UI, or
+/// future Grok settings to an individual provider.
+pub fn extract_provider_profile_config_text(config_toml: &str) -> Result<String, AppError> {
+    let source = parse_edit_document(config_toml)?;
+    let mut profile = toml_edit::DocumentMut::new();
+    copy_table_key(&mut profile, &source, "endpoints", "models_base_url");
+    copy_table_key(&mut profile, &source, "models", "default");
+    copy_table_key(&mut profile, &source, "models", "web_search");
+    if let Some(subagents) = source.get("subagents") {
+        profile["subagents"] = subagents.clone();
+    }
+    if let Some(models) = source.get("model") {
+        profile["model"] = models.clone();
+    }
+    Ok(profile.to_string())
+}
+
+/// Merge a provider-owned Grok profile into the current full live config while
+/// preserving every global/unrecognized section and key.
+pub fn merge_provider_profile_config_text(
+    live_config_toml: &str,
+    provider_config_toml: &str,
+) -> Result<String, AppError> {
+    validate_config_toml(provider_config_toml)?;
+    let mut live = parse_edit_document(live_config_toml)?;
+    let provider = parse_edit_document(provider_config_toml)?;
+    remove_provider_owned_fields(&mut live);
+    copy_table_key(&mut live, &provider, "endpoints", "models_base_url");
+    copy_table_key(&mut live, &provider, "models", "default");
+    copy_table_key(&mut live, &provider, "models", "web_search");
+    if let Some(subagents) = provider.get("subagents") {
+        live["subagents"] = subagents.clone();
+    }
+    if let Some(models) = provider.get("model") {
+        live["model"] = models.clone();
+    }
+    Ok(live.to_string())
+}
+
+/// Remove provider-owned Grok fields while retaining global config. This is
+/// the official-login transition: the absence of `[models]`/`[model.*]` lets
+/// Grok use its own OAuth state without erasing telemetry, harness, UI, or MCP.
+pub fn remove_provider_profile_config_text(config_toml: &str) -> Result<String, AppError> {
+    let mut document = parse_edit_document(config_toml)?;
+    remove_provider_owned_fields(&mut document);
+    Ok(document.to_string())
+}
+
+pub fn extract_provider_profile_from_settings(settings: &mut Value) -> Result<(), AppError> {
+    let Some(config_toml) = settings.get("config").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let profile = extract_provider_profile_config_text(config_toml)?;
+    if let Some(object) = settings.as_object_mut() {
+        object.insert("config".to_string(), Value::String(profile));
+    }
+    Ok(())
+}
+
+/// Apply the opt-in privacy preset to a config draft. This function does not
+/// write the file; the UI shows the resulting TOML and requires an explicit
+/// Save so users can inspect the exact changes first.
+pub fn apply_privacy_protection_config_text(config_toml: &str) -> Result<String, AppError> {
+    let mut document = parse_edit_document(config_toml)?;
+    document["features"]["telemetry"] = toml_edit::value(false);
+    document["telemetry"]["trace_upload"] = toml_edit::value(false);
+    document["telemetry"]["mixpanel_enabled"] = toml_edit::value(false);
+    document["harness"]["disable_codebase_upload"] = toml_edit::value(true);
+    Ok(document.to_string())
 }
 
 pub fn extract_model_config(config_toml: &str) -> Option<GrokModelConfig> {
@@ -286,9 +492,41 @@ pub fn apply_proxy_takeover(
     proxy_base_url: &str,
     token_placeholder: &str,
 ) -> Result<String, AppError> {
-    let updated = update_selected_model_string(config_toml, "base_url", proxy_base_url)?;
-    let updated = update_selected_model_string(&updated, "api_key", token_placeholder)?;
-    update_selected_model_string(&updated, "api_backend", DEFAULT_API_BACKEND)
+    validate_config_toml(config_toml)?;
+    let mut document = parse_edit_document(config_toml)?;
+    let models = document
+        .get_mut("model")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| {
+            AppError::localized(
+                "provider.grokbuild.model.missing",
+                "Grok Build 配置缺少 [model.<name>]",
+                "Grok Build configuration is missing [model.<name>]",
+            )
+        })?;
+
+    let mut takeover_count = 0usize;
+    for (_, item) in models.iter_mut() {
+        let Some(model) = item.as_table_like_mut() else {
+            continue;
+        };
+        model.insert("base_url", toml_edit::value(proxy_base_url));
+        model.insert("api_key", toml_edit::value(token_placeholder));
+        // The Grok proxy exposes the Responses protocol for every profile.
+        // Forcing this value avoids routing non-default/subagent profiles to a
+        // chat-completions endpoint that this adapter intentionally does not expose.
+        model.insert("api_backend", toml_edit::value(DEFAULT_API_BACKEND));
+        takeover_count += 1;
+    }
+    if takeover_count == 0 {
+        return Err(AppError::localized(
+            "provider.grokbuild.model.missing",
+            "Grok Build 配置缺少可接管的 [model.<name>]",
+            "Grok Build configuration has no [model.<name>] entry to take over",
+        ));
+    }
+    document["endpoints"]["models_base_url"] = toml_edit::value(proxy_base_url);
+    Ok(document.to_string())
 }
 
 pub fn update_api_key(config_toml: &str, api_key: &str) -> Result<String, AppError> {
@@ -296,9 +534,24 @@ pub fn update_api_key(config_toml: &str, api_key: &str) -> Result<String, AppErr
 }
 
 pub fn has_proxy_placeholder(config_toml: &str, token_placeholder: &str) -> bool {
-    extract_model_config(config_toml)
-        .and_then(|config| config.api_key)
-        .is_some_and(|api_key| api_key == token_placeholder)
+    config_toml
+        .parse::<toml::Value>()
+        .ok()
+        .and_then(|document| {
+            document
+                .get("model")
+                .and_then(toml::Value::as_table)
+                .cloned()
+        })
+        .is_some_and(|models| {
+            models.values().any(|model| {
+                model
+                    .as_table()
+                    .and_then(|table| table.get("api_key"))
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|api_key| api_key == token_placeholder)
+            })
+        })
 }
 
 pub fn base_url_matches(config_toml: &str, predicate: impl FnOnce(&str) -> bool) -> bool {
@@ -367,6 +620,106 @@ pub fn read_grok_live_settings() -> Result<Value, AppError> {
     Ok(json!({ "config": config }))
 }
 
+fn backup_current_grok_config(path: &Path, next_config: &str) -> Result<Option<PathBuf>, AppError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let current = fs::read_to_string(path).map_err(|error| AppError::io(path, error))?;
+    if current == next_config {
+        return Ok(None);
+    }
+
+    let backup_dir = get_grok_config_backup_dir();
+    let filename = format!(
+        "{}{}.toml",
+        GROK_CONFIG_BACKUP_PREFIX,
+        Utc::now().format("%Y%m%d_%H%M%S_%9f")
+    );
+    let backup_path = backup_dir.join(filename);
+    write_text_file(&backup_path, &current)?;
+
+    let backups = list_grok_config_backups()?;
+    for stale in backups.into_iter().skip(MAX_GROK_CONFIG_BACKUPS) {
+        let stale_path = backup_dir.join(stale.filename);
+        fs::remove_file(&stale_path).map_err(|error| AppError::io(&stale_path, error))?;
+    }
+    Ok(Some(backup_path))
+}
+
+fn validated_backup_path(filename: &str) -> Result<PathBuf, AppError> {
+    let candidate = Path::new(filename);
+    let is_plain_filename = candidate
+        .file_name()
+        .is_some_and(|value| value == candidate.as_os_str());
+    if !is_plain_filename
+        || !filename.starts_with(GROK_CONFIG_BACKUP_PREFIX)
+        || !filename.ends_with(".toml")
+    {
+        return Err(AppError::Config(
+            "Invalid Grok Build backup filename".to_string(),
+        ));
+    }
+    Ok(get_grok_config_backup_dir().join(filename))
+}
+
+pub fn list_grok_config_backups() -> Result<Vec<GrokConfigBackup>, AppError> {
+    let backup_dir = get_grok_config_backup_dir();
+    if !backup_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut backups = Vec::new();
+    let entries = fs::read_dir(&backup_dir).map_err(|error| AppError::io(&backup_dir, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| AppError::io(&backup_dir, error))?;
+        let path = entry.path();
+        let filename = entry.file_name().to_string_lossy().to_string();
+        if !entry
+            .file_type()
+            .map_err(|error| AppError::io(&path, error))?
+            .is_file()
+            || !filename.starts_with(GROK_CONFIG_BACKUP_PREFIX)
+            || !filename.ends_with(".toml")
+        {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| AppError::io(&path, error))?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .map(DateTime::<Utc>::from)
+            .unwrap_or_else(Utc::now);
+        backups.push(GrokConfigBackup {
+            filename,
+            path: path.to_string_lossy().to_string(),
+            created_at: modified.to_rfc3339(),
+            size_bytes: metadata.len(),
+        });
+    }
+    backups.sort_by(|left, right| right.filename.cmp(&left.filename));
+    Ok(backups)
+}
+
+pub fn restore_grok_config_backup(filename: &str) -> Result<String, AppError> {
+    let backup_path = validated_backup_path(filename)?;
+    let config =
+        fs::read_to_string(&backup_path).map_err(|error| AppError::io(&backup_path, error))?;
+    validate_config_toml_syntax(&config)?;
+    write_grok_live_settings(&json!({ "config": config }))?;
+    Ok(config)
+}
+
+pub fn delete_grok_config_backup(filename: &str) -> Result<bool, AppError> {
+    let backup_path = validated_backup_path(filename)?;
+    if !backup_path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&backup_path).map_err(|error| AppError::io(&backup_path, error))?;
+    Ok(true)
+}
+
 pub fn write_grok_provider_live(provider: &Provider) -> Result<(), AppError> {
     let settings = provider.settings_config.as_object().ok_or_else(|| {
         AppError::localized(
@@ -386,14 +739,23 @@ pub fn write_grok_provider_live(provider: &Provider) -> Result<(), AppError> {
             )
         })?;
 
-    // 官方条目不注入自定义模型表：按快照原样写回（首次为空文件），
-    // Grok CLI 回落到官方内置模型 + 自带 OAuth 登录；MCP 投影随后由
-    // 切换流程重新补写。非官方供应商必须携带完整的自定义模型配置。
-    if provider.category.as_deref() != Some("official") {
-        validate_config_toml(config)?;
-    }
+    let path = get_grok_config_path();
+    let live_config = if path.exists() {
+        fs::read_to_string(&path).map_err(|error| AppError::io(&path, error))?
+    } else {
+        String::new()
+    };
+    validate_config_toml_syntax(&live_config)?;
 
-    write_grok_live_settings(&json!({ "config": config }))
+    // Provider switches replace only provider-owned endpoint/model fields.
+    // Global flags, MCP projections, and unknown future Grok settings remain
+    // attached to the live installation rather than following a provider.
+    let merged = if provider.category.as_deref() == Some("official") {
+        remove_provider_profile_config_text(&live_config)?
+    } else {
+        merge_provider_profile_config_text(&live_config, config)?
+    };
+    write_grok_live_settings(&json!({ "config": merged }))
 }
 
 /// Raw live-file writer, mirroring `read_grok_live_settings` (syntax-only).
@@ -412,7 +774,9 @@ pub fn write_grok_live_settings(settings: &Value) -> Result<(), AppError> {
             )
         })?;
     validate_config_toml_syntax(config)?;
-    write_text_file(&get_grok_config_path(), config)
+    let path = get_grok_config_path();
+    backup_current_grok_config(&path, config)?;
+    write_text_file(&path, config)
 }
 
 #[cfg(test)]
@@ -536,6 +900,96 @@ context_window = 500000
     }
 
     #[test]
+    fn takeover_updates_every_model_and_the_shared_endpoint() {
+        let config = format!(
+            "{}\n[model.worker]\nmodel = \"worker-model\"\nbase_url = \"https://worker.example/v1\"\nname = \"Worker\"\nenv_key = \"WORKER_KEY\"\napi_backend = \"chat_completions\"\ncontext_window = 128000\ncustom_flag = true\n",
+            valid_config()
+        );
+
+        let updated = apply_proxy_takeover(
+            &config,
+            "http://127.0.0.1:15721/grokbuild/v1",
+            "PROXY_MANAGED",
+        )
+        .expect("take over every model");
+        let document = updated.parse::<toml::Value>().expect("updated TOML");
+        let models = document["model"].as_table().expect("model table");
+        assert_eq!(models.len(), 2);
+        for model in models.values() {
+            let model = model.as_table().expect("model profile");
+            assert_eq!(
+                model.get("base_url").and_then(toml::Value::as_str),
+                Some("http://127.0.0.1:15721/grokbuild/v1")
+            );
+            assert_eq!(
+                model.get("api_key").and_then(toml::Value::as_str),
+                Some("PROXY_MANAGED")
+            );
+            assert_eq!(
+                model.get("api_backend").and_then(toml::Value::as_str),
+                Some(DEFAULT_API_BACKEND)
+            );
+        }
+        assert_eq!(
+            document["endpoints"]["models_base_url"].as_str(),
+            Some("http://127.0.0.1:15721/grokbuild/v1")
+        );
+        assert_eq!(
+            document["model"]["worker"]["custom_flag"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn provider_profile_merge_preserves_live_global_and_mcp_settings() {
+        let live = r#"[features]
+telemetry = true
+
+[harness]
+custom_future_flag = "keep"
+
+[mcp_servers.echo]
+command = "echo"
+
+[models]
+default = "old"
+
+[model.old]
+model = "old"
+base_url = "https://old.example/v1"
+name = "Old"
+api_key = "old-secret"
+api_backend = "responses"
+context_window = 1000
+"#;
+
+        let merged = merge_provider_profile_config_text(live, valid_config()).expect("merge");
+        let document = merged.parse::<toml::Value>().expect("merged TOML");
+        assert_eq!(document["features"]["telemetry"].as_bool(), Some(true));
+        assert_eq!(
+            document["harness"]["custom_future_flag"].as_str(),
+            Some("keep")
+        );
+        assert_eq!(
+            document["mcp_servers"]["echo"]["command"].as_str(),
+            Some("echo")
+        );
+        assert!(document["model"].get("old").is_none());
+        assert!(document["model"].get("grok-4.5").is_some());
+
+        let profile = extract_provider_profile_config_text(&merged).expect("extract profile");
+        assert!(!profile.contains("features"));
+        assert!(!profile.contains("harness"));
+        assert!(!profile.contains("mcp_servers"));
+        validate_config_toml(&profile).expect("profile remains valid");
+
+        let official = remove_provider_profile_config_text(&merged).expect("official config");
+        assert!(is_official_live_config(&official));
+        assert!(official.contains("custom_future_flag"));
+        assert!(official.contains("mcp_servers.echo"));
+    }
+
+    #[test]
     #[serial]
     fn resolves_api_key_from_configured_environment_variable() {
         let original = std::env::var_os("GROK_TEST_API_KEY");
@@ -615,9 +1069,19 @@ context_window = 500000
     fn official_provider_roundtrips_without_custom_model_tables() {
         let temp = TempDir::new().expect("temp dir");
         let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let original_config = std::env::var_os("GROK_CONFIG");
+        let original_grok_home = std::env::var_os("GROK_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::remove_var("GROK_CONFIG");
+        std::env::remove_var("GROK_HOME");
 
-        // 官方条目：空 config 可写（清掉自定义模型表，交还 Grok CLI 官方登录）
+        let existing = format!(
+            "[features]\ntelemetry = false\n\n[mcp_servers.echo]\ncommand = \"echo\"\n\n{}",
+            valid_config()
+        );
+        write_grok_live_settings(&json!({ "config": existing })).expect("seed full live config");
+
+        // 官方条目：仅清掉自定义模型字段，保留全局配置与 MCP 投影。
         let mut official = Provider::with_id(
             "grokbuild-official".to_string(),
             "Grok Official".to_string(),
@@ -626,10 +1090,11 @@ context_window = 500000
         );
         official.category = Some("official".to_string());
         write_grok_provider_live(&official).expect("official empty config is writable");
-        assert_eq!(
-            fs::read_to_string(get_grok_config_path()).expect("read config"),
-            ""
-        );
+        let official_config =
+            fs::read_to_string(get_grok_config_path()).expect("read official config");
+        assert!(official_config.contains("telemetry = false"));
+        assert!(official_config.contains("mcp_servers.echo"));
+        assert!(is_official_live_config(&official_config));
 
         // 官方态 live（如 MCP 投影补写后）无自定义模型表，读取与原样写回都必须可用
         let official_live = "[mcp_servers.echo]\ncommand = \"echo\"\n";
@@ -654,6 +1119,14 @@ context_window = 500000
             Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
             None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
         }
+        match original_config {
+            Some(value) => std::env::set_var("GROK_CONFIG", value),
+            None => std::env::remove_var("GROK_CONFIG"),
+        }
+        match original_grok_home {
+            Some(value) => std::env::set_var("GROK_HOME", value),
+            None => std::env::remove_var("GROK_HOME"),
+        }
     }
 
     #[test]
@@ -661,7 +1134,11 @@ context_window = 500000
     fn writes_and_reads_live_config() {
         let temp = TempDir::new().expect("temp dir");
         let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let original_config = std::env::var_os("GROK_CONFIG");
+        let original_grok_home = std::env::var_os("GROK_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::remove_var("GROK_CONFIG");
+        std::env::remove_var("GROK_HOME");
 
         let provider = Provider::with_id(
             "grok".to_string(),
@@ -688,6 +1165,94 @@ context_window = 500000
         match original_test_home {
             Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
             None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match original_config {
+            Some(value) => std::env::set_var("GROK_CONFIG", value),
+            None => std::env::remove_var("GROK_CONFIG"),
+        }
+        match original_grok_home {
+            Some(value) => std::env::set_var("GROK_HOME", value),
+            None => std::env::remove_var("GROK_HOME"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn resolves_grok_config_environment_contract() {
+        let temp = TempDir::new().expect("temp dir");
+        let original_config = std::env::var_os("GROK_CONFIG");
+        let original_home = std::env::var_os("GROK_HOME");
+
+        std::env::set_var("GROK_HOME", temp.path().join("home"));
+        std::env::remove_var("GROK_CONFIG");
+        let home_location = get_grok_config_location();
+        assert_eq!(home_location.source, "GROK_HOME");
+        assert_eq!(
+            PathBuf::from(home_location.path),
+            temp.path().join("home").join("config.toml")
+        );
+
+        std::env::set_var("GROK_CONFIG", temp.path().join("explicit.toml"));
+        let explicit_location = get_grok_config_location();
+        assert_eq!(explicit_location.source, "GROK_CONFIG");
+        assert_eq!(
+            PathBuf::from(explicit_location.path),
+            temp.path().join("explicit.toml")
+        );
+
+        match original_config {
+            Some(value) => std::env::set_var("GROK_CONFIG", value),
+            None => std::env::remove_var("GROK_CONFIG"),
+        }
+        match original_home {
+            Some(value) => std::env::set_var("GROK_HOME", value),
+            None => std::env::remove_var("GROK_HOME"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn backs_up_restores_and_deletes_global_config() {
+        let temp = TempDir::new().expect("temp dir");
+        let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let original_config = std::env::var_os("GROK_CONFIG");
+        let original_grok_home = std::env::var_os("GROK_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::remove_var("GROK_CONFIG");
+        std::env::remove_var("GROK_HOME");
+
+        let first = "[features]\ntelemetry = true\n";
+        let second = "[features]\ntelemetry = false\n";
+        write_grok_live_settings(&json!({ "config": first })).expect("first write");
+        write_grok_live_settings(&json!({ "config": second })).expect("second write");
+
+        let backups = list_grok_config_backups().expect("list backups");
+        assert_eq!(backups.len(), 1);
+        let filename = backups[0].filename.clone();
+        assert_eq!(
+            fs::read_to_string(&backups[0].path).expect("backup content"),
+            first
+        );
+
+        let restored = restore_grok_config_backup(&filename).expect("restore backup");
+        assert_eq!(restored, first);
+        assert_eq!(
+            fs::read_to_string(get_grok_config_path()).expect("restored live"),
+            first
+        );
+        assert!(delete_grok_config_backup(&filename).expect("delete backup"));
+
+        match original_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match original_config {
+            Some(value) => std::env::set_var("GROK_CONFIG", value),
+            None => std::env::remove_var("GROK_CONFIG"),
+        }
+        match original_grok_home {
+            Some(value) => std::env::set_var("GROK_HOME", value),
+            None => std::env::remove_var("GROK_HOME"),
         }
     }
 }

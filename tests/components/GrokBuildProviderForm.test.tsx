@@ -1,11 +1,17 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { parse as parseToml } from "smol-toml";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GrokBuildProviderForm,
   grokApiBackendFromApiFormat,
 } from "@/components/providers/forms/GrokBuildProviderForm";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
 
 vi.mock("@/components/JsonEditor", () => ({
   default: ({
@@ -24,6 +30,11 @@ vi.mock("@/components/JsonEditor", () => ({
 }));
 
 describe("GrokBuildProviderForm", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue("");
+  });
+
   it("offers curated Grok Build presets and applies one", async () => {
     const user = userEvent.setup();
     const { container } = render(
@@ -141,6 +152,35 @@ describe("GrokBuildProviderForm", () => {
 
     expect(screen.getByText(/Invalid config\.toml:/)).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("can merge the provider profile into the live global config", async () => {
+    const user = userEvent.setup();
+    render(
+      <GrokBuildProviderForm
+        submitLabel="Save"
+        onSubmit={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /PatewayAI/ }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "test-key" },
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Apply profile to live config" }),
+    );
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "merge_grok_profile_into_global_config",
+        expect.objectContaining({
+          profileContent: expect.stringContaining('[model."grok-4.5"]'),
+        }),
+      ),
+    );
   });
 
   it("loads edit-mode values and does not resubmit stale custom endpoints", async () => {

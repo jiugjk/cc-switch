@@ -12,15 +12,15 @@
 <a href="https://trendshift.io/repositories/15372" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15372" alt="farion1231%2Fcc-switch | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 <a href="https://www.star-history.com/#jiugjk/cc-switch&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=farion1231/cc-switch&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=farion1231/cc-switch" width="196" height="55" /></picture></a>
 
-### 🌐 唯一官方网站：**[ccswitch.io](https://ccswitch.io)**
+### 🌐 上游项目网站：**[ccswitch.io](https://ccswitch.io)**
 
 [English](README.md) | 中文 | [更新日志](CHANGELOG.md)
 
 </div>
 
-## 🔀 关于本 Fork
+## 关于此独立发行版
 
-本仓库 fork 自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，在上游 v3.19.1 基础上新增以下功能：
+这是一个独立维护的 Windows 发行版，基于 MIT 许可的 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，拥有独立发布节奏，并在上游 v3.19.1 基础上新增以下功能：
 
 ### CodexCont 与代理
 
@@ -28,6 +28,7 @@
 - **路由可观测** — `ProxyStatus` 暴露 last-route 字段；通用设置页展示 `ProxyStatusSummary`（当前供应商、最近成功/失败、故障转移原因）。
 - **额度归因** — 识别额度耗尽类错误并记录 `last_fallback_reason`；可选 `decouple_official_quota` 避免官方鉴权强行切到自定义 API 故障转移。**不新增**独立的「额度 fallback」开关，统一走既有 failover。
 - **供应商能力解析** — 声明/启发式能力快照（含 Chat = 降级续写），便于更安全的路由决策。
+- **使用指南** — [CodexCont 触发逻辑、费用与安全边界](docs/guides/codex-continuation-guide-zh.md)（[English](docs/guides/codex-continuation-guide-en.md) · [日本語](docs/guides/codex-continuation-guide-ja.md)）。
 
 ### 应用探测与界面
 
@@ -36,10 +37,11 @@
 - **检测文案本地化** — `not installed or not executable` 按当前界面语言显示。
 - **工具官网链接** — 工具名旁快捷打开官网。
 - **更新 Windows 安装命令** — 各工具一键安装命令已刷新。
+- **Grok Build 配置所有权** — 供应商切换只替换模型/端点资料，保留全局 TOML、MCP 与未来配置；支持 `GROK_CONFIG` / `GROK_HOME`、完整文件编辑、隐私草稿与本地可恢复备份。参见[配置指南](docs/guides/grok-build-config-guide-zh.md)（[English](docs/guides/grok-build-config-guide-en.md) · [日本語](docs/guides/grok-build-config-guide-ja.md)）。
 
 ### 构建
 
-- **免费 Windows 自动构建** — GitHub Actions 在 `main` 的 **CI 通过后**（或在 `main` 上手动 `workflow_dispatch`）于免费托管 runner 上构建**未签名** NSIS / MSI / 便携版。本 fork **不发布** macOS/Linux 安装包，也无代码签名 / 自动更新通道。
+- **免费 Windows 自动构建** — GitHub Actions 在 `main` 的 **CI 通过后**（或在 `main` 上手动 `workflow_dispatch`）于免费托管 runner 上构建**未签名** NSIS / MSI / 便携版。本发行版**不发布** macOS/Linux 安装包，也无代码签名 / 自动更新通道。
 
 用户侧开放确认：代理开/关的真实请求矩阵；接管开启时确认 ChatGPT 桌面流量进入 `127.0.0.1:15721` `/v1/responses`。
 
@@ -54,7 +56,7 @@
 - **统一 MCP, SKILLS 管理** — 一个面板管理 Claude、Codex、Gemini、Grok Build、OpenCode 和 Hermes 的 MCP, SKILLS, 支持双向同步
 - **系统托盘快速切换** — 从托盘菜单即时切换供应商，无需打开完整应用
 - **云同步** — 通过 Dropbox、OneDrive、iCloud 或 WebDAV 服务器在不同设备之间同步供应商数据
-- **跨平台（上游）** — 上游支持 Windows、macOS 和 Linux；**本 fork 已发布安装包仅为 Windows x64**
+- **跨平台（上游）** — 上游支持 Windows、macOS 和 Linux；**本发行版已发布安装包仅为 Windows x64**
 - **小工具** - 内置了多种小工具来解决首次安装登录确认、禁止签名、插件拓展同步等多种功能
 
 ## 界面预览
@@ -197,9 +199,9 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 ### 系统要求
 
-- **本 fork 仅发布 Windows x64 构建**（Windows 10+）。macOS / Linux 安装包**不由** `jiugjk/cc-switch` 发布 — 需要这些平台请使用 [上游 Releases](https://github.com/farion1231/cc-switch/releases)。
+- **本发行版仅发布 Windows x64 构建**（Windows 10+）。macOS / Linux 安装包**不由** `jiugjk/cc-switch` 发布 — 需要这些平台请使用 [上游 Releases](https://github.com/farion1231/cc-switch/releases)。
 
-### Windows 用户（本 fork）
+### Windows 用户
 
 从 [Releases](../../releases) 页面下载最新版本。产物通常包括：
 
@@ -211,8 +213,8 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 > **说明**
 > - **未代码签名**：Windows SmartScreen 可能提示，选「仍要运行」即可。
-> - **无自动更新通道**：本 fork 已移除应用内更新器（`createUpdaterArtifacts` 为 false、无 `plugins.updater` 配置、无签名密钥），「检查更新」会打开本 fork 的发布页手动下载。
-> - 标签形如 `v3.19.1-fork.<run_number>`，并指向实际构建的提交。
+> - **无自动更新通道**：本发行版已移除应用内更新器（`createUpdaterArtifacts` 为 false、无 `plugins.updater` 配置、无签名密钥），「检查更新」会打开本发行版发布页手动下载。
+> - 自动构建标签形如 `v3.19.1-windows.<run_number>`，并指向实际构建的提交。
 
 <details>
 <summary><strong>架构总览</strong></summary>
@@ -409,9 +411,11 @@ pnpm test:unit --coverage
 
 ## 致谢
 
-本项目 fork 自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)（作者 Jason Young）。主体功能仍属上游工作，感谢原作者与贡献者。
+本发行版基于 Jason Young 的 MIT 许可项目 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)。主体功能仍属上游工作，感谢原作者与贡献者；独立维护与发布元数据不会移除原始版权及许可声明。
 
-赞助商列表由上游维护（本 fork 不再镜像）：[上游赞助商](https://github.com/farion1231/cc-switch/blob/main/README_ZH.md).
+Grok Build 全局配置工作流参考了 MIT 许可的 [2836048681/cc-switch-codexcont](https://github.com/2836048681/cc-switch-codexcont)，并按本发行版仅 Responses 的代理路由、数据库所有的 MCP 投影和既有事务备份模型重新适配。
+
+赞助商列表由上游维护（本发行版不再镜像）：[上游赞助商](https://github.com/farion1231/cc-switch/blob/main/README_ZH.md).
 
 ## License
 

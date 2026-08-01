@@ -435,8 +435,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
   const handleOpenReleaseNotes = useCallback(async () => {
     try {
-      // fork 的发布标签形如 v3.17.0-fork.<run>，与应用版本号不一一对应，
-      // 统一打开 fork 发布列表页而非具体 tag。
+      // 自动构建标签形如 v3.19.1-windows.<run>，与应用版本号不一一对应，
+      // 统一打开本发行版发布列表页而非具体 tag。
       await settingsApi.openExternal(
         "https://github.com/jiugjk/cc-switch/releases",
       );
@@ -446,8 +446,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     }
   }, [t]);
 
-  // 本 fork 已禁用应用内自动更新（无签名密钥、无更新通道）：
-  // 「检查更新」退化为打开 fork 的 GitHub 发布页，由用户手动下载安装。
+  // 本发行版已禁用应用内自动更新（无签名密钥、无更新通道）：
+  // 「检查更新」退化为打开本发行版的 GitHub 发布页，由用户手动下载安装。
   const handleCheckUpdate = useCallback(async () => {
     try {
       await settingsApi.checkUpdates();

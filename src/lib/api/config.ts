@@ -1,7 +1,28 @@
 // 配置相关 API
 import { invoke } from "@tauri-apps/api/core";
 
-export type AppType = "claude" | "codex" | "gemini" | "omo" | "omo_slim";
+export type AppType =
+  | "claude"
+  | "codex"
+  | "gemini"
+  | "grokbuild"
+  | "omo"
+  | "omo_slim";
+
+export interface GrokGlobalConfig {
+  path: string;
+  directory: string;
+  source: "GROK_CONFIG" | "GROK_HOME" | "settings" | "default";
+  exists: boolean;
+  content: string;
+}
+
+export interface GrokConfigBackup {
+  filename: string;
+  path: string;
+  createdAt: string;
+  sizeBytes: number;
+}
 
 /**
  * 获取 Claude 通用配置片段（已废弃，使用 getCommonConfigSnippet）
@@ -97,4 +118,42 @@ export async function extractCommonConfigSnippet(
   }
 
   return invoke<string>("extract_common_config_snippet", args);
+}
+
+export async function readGrokGlobalConfig(): Promise<GrokGlobalConfig> {
+  return invoke<GrokGlobalConfig>("read_grok_global_config");
+}
+
+export async function writeGrokGlobalConfig(content: string): Promise<void> {
+  return invoke("write_grok_global_config", { content });
+}
+
+export async function mergeGrokProfileIntoGlobalConfig(
+  profileContent: string,
+): Promise<string> {
+  return invoke<string>("merge_grok_profile_into_global_config", {
+    profileContent,
+  });
+}
+
+export async function previewGrokPrivacyProtection(
+  content: string,
+): Promise<string> {
+  return invoke<string>("preview_grok_privacy_protection", { content });
+}
+
+export async function listGrokConfigBackups(): Promise<GrokConfigBackup[]> {
+  return invoke<GrokConfigBackup[]>("list_grok_config_backups");
+}
+
+export async function restoreGrokConfigBackup(
+  filename: string,
+): Promise<string> {
+  return invoke<string>("restore_grok_config_backup", { filename });
+}
+
+export async function deleteGrokConfigBackup(
+  filename: string,
+): Promise<boolean> {
+  return invoke<boolean>("delete_grok_config_backup", { filename });
 }

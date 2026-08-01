@@ -1,6 +1,6 @@
 name: CI
 
-# Fork: Windows x64 checks only (no macOS / Linux matrix).
+# This distribution runs Windows x64 checks only (no macOS / Linux matrix).
 on:
   pull_request:
     branches: [main]

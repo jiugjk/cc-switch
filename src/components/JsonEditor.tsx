@@ -19,7 +19,7 @@ interface JsonEditorProps {
   darkMode?: boolean;
   rows?: number;
   showValidation?: boolean;
-  language?: "json" | "javascript";
+  language?: "json" | "javascript" | "plaintext";
   height?: string | number;
   showMinimap?: boolean; // 添加此属性以防未来使用
 }
@@ -137,7 +137,11 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
 
     const extensions = [
       basicSetup,
-      language === "javascript" ? javascript() : json(),
+      ...(language === "javascript"
+        ? [javascript()]
+        : language === "json"
+          ? [json()]
+          : []),
       placeholder(placeholderText || ""),
       baseTheme,
       sizingTheme,

@@ -2,10 +2,10 @@
 
 use tauri::AppHandle;
 
-/// 本 fork 已禁用应用内自动更新（无签名密钥、无 latest.json 更新通道）的统一提示。
-/// 前端捕获该错误后回退到 `check_for_updates`（打开 fork 发布页）的手动流程。
+/// 本发行版已禁用应用内自动更新（无签名密钥、无 latest.json 更新通道）的统一提示。
+/// 前端捕获该错误后回退到 `check_for_updates`（打开发行版发布页）的手动流程。
 pub(crate) const UPDATER_DISABLED_MESSAGE: &str =
-    "Auto-update is disabled in this fork; download builds from the GitHub releases page";
+    "Auto-update is disabled in this distribution; download builds from the GitHub releases page";
 
 fn merge_settings_for_save(
     mut incoming: crate::settings::AppSettings,
@@ -186,20 +186,20 @@ pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 下载并安装应用更新（本 fork 中为禁用桩）。
+/// 下载并安装应用更新（本发行版中为禁用桩）。
 ///
-/// fork 没有 `TAURI_SIGNING_PRIVATE_KEY`，CI 构建关闭了 `createUpdaterArtifacts`，
+/// 本发行版没有 `TAURI_SIGNING_PRIVATE_KEY`，CI 构建关闭了 `createUpdaterArtifacts`，
 /// 不存在可校验的 latest.json / 签名产物；`plugins.updater` 配置与 updater 插件
 /// 也已整体移除。保留命令桩以维持 IPC 表面（前端无需分叉编译）：调用方拿到
-/// Err 后走 `check_for_updates` 打开 fork 发布页的手动更新流程。
+/// Err 后走 `check_for_updates` 打开发行版发布页的手动更新流程。
 #[tauri::command]
 pub async fn install_update_and_restart() -> Result<bool, String> {
     Err(UPDATER_DISABLED_MESSAGE.to_string())
 }
 
-/// 检查是否有可用的应用更新（本 fork 中为禁用桩，恒返回 None）。
+/// 检查是否有可用的应用更新（本发行版中为禁用桩，恒返回 None）。
 ///
-/// 数据库版本过新的恢复界面用它判断：升级应用能否解决问题。fork 无自动更新
+/// 数据库版本过新的恢复界面用它判断：升级应用能否解决问题。本发行版无自动更新
 /// 通道，恒返回 None → 恢复界面进入 "incompatible" 分支，引导用户去发布页
 /// 手动下载新构建，而不是提供一条注定失败的一键升级路径。
 #[tauri::command]
@@ -542,15 +542,15 @@ mod tests {
         assert!(merged.local_migrations.is_none());
     }
 
-    /// F-001 回归：fork 的更新命令必须保持禁用桩——install 报"已禁用"错误、
+    /// F-001 回归：本发行版的更新命令必须保持禁用桩——install 报"已禁用"错误、
     /// check 恒 None，绝不触达（已移除的）updater 插件状态。
     #[tokio::test]
     async fn install_update_and_restart_returns_disabled_error() {
         let err = super::install_update_and_restart()
             .await
-            .expect_err("fork updater stub must return Err");
+            .expect_err("distribution updater stub must return Err");
         assert!(
-            err.contains("disabled in this fork"),
+            err.contains("disabled in this distribution"),
             "unexpected error message: {err}"
         );
     }
@@ -562,7 +562,7 @@ mod tests {
 
     /// F-001 回归：tauri.conf.json 不得再携带上游更新通道——无 plugins.updater
     /// 配置（上游 pubkey + latest.json endpoint），且 createUpdaterArtifacts 为 false
-    /// （fork 无签名密钥，仓库配置须与 CI 现实一致）。
+    /// （本发行版无签名密钥，仓库配置须与 CI 现实一致）。
     #[test]
     fn tauri_conf_has_no_upstream_update_channel() {
         let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"))
@@ -571,12 +571,12 @@ mod tests {
 
         assert!(
             conf.pointer("/plugins/updater").is_none(),
-            "plugins.updater must not exist in the fork config"
+            "plugins.updater must not exist in the distribution config"
         );
         assert_eq!(
             conf.pointer("/bundle/createUpdaterArtifacts"),
             Some(&serde_json::Value::Bool(false)),
-            "bundle.createUpdaterArtifacts must be false in the fork config"
+            "bundle.createUpdaterArtifacts must be false in the distribution config"
         );
         assert!(
             !raw.contains("releases/latest/download/latest.json"),

@@ -841,6 +841,13 @@ fn restore_live_settings_for_provider_backfill(
                 provider.id
             );
         }
+        if let Err(err) = crate::grok_config::extract_provider_profile_from_settings(&mut settings)
+        {
+            log::warn!(
+                "Failed to extract the Grok Build provider profile while backfilling '{}': {err}",
+                provider.id
+            );
+        }
         return settings;
     }
     if !matches!(app_type, AppType::Codex) {
@@ -1491,6 +1498,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
             // （`import_default_config_internal`）。
             crate::grok_config::validate_config_toml(config)?;
             crate::grok_config::strip_grok_mcp_servers_from_settings(&mut settings)?;
+            crate::grok_config::extract_provider_profile_from_settings(&mut settings)?;
             settings
         }
         AppType::Claude => {

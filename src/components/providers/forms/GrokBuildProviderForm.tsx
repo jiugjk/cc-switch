@@ -3,6 +3,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { FileCog, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Form,
@@ -51,6 +52,8 @@ import {
 } from "@/utils/grokBuildConfig";
 import { resolveProviderIcon } from "@/utils/providerIcon";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
+import { configApi } from "@/lib/api";
+import { GrokGlobalConfigModal } from "./GrokGlobalConfigModal";
 
 type GrokBuildProviderFormProps = Omit<ProviderFormProps, "appId">;
 
@@ -158,6 +161,8 @@ export function GrokBuildProviderForm({
     initialData?.meta?.endpointAutoSelect ?? true,
   );
   const [isEndpointModalOpen, setIsEndpointModalOpen] = useState(false);
+  const [isGlobalConfigOpen, setIsGlobalConfigOpen] = useState(false);
+  const [isApplyingProfile, setIsApplyingProfile] = useState(false);
   const [presetEndpoints, setPresetEndpoints] = useState<string[]>([]);
   const [draftCustomEndpoints, setDraftCustomEndpoints] = useState<string[]>(
     [],
@@ -430,6 +435,23 @@ export function GrokBuildProviderForm({
 
   const rawConfigError = validateGrokBuildConfig(rawConfig);
 
+  const applyProfileToLive = async () => {
+    setIsApplyingProfile(true);
+    try {
+      await configApi.mergeGrokProfileIntoGlobalConfig(rawConfig);
+      toast.success(
+        t("grokBuild.profileApplied", {
+          defaultValue:
+            "Provider model profile applied; global and MCP settings were preserved",
+        }),
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsApplyingProfile(false);
+    }
+  };
+
   return (
     <Form {...form}>
       <form
@@ -488,7 +510,9 @@ export function GrokBuildProviderForm({
 
               <FormItem>
                 <FormLabel htmlFor="grokbuild-context-window">
-                  {t("grokBuild.contextWindow", { defaultValue: "上下文窗口" })}
+                  {t("grokBuild.contextWindow", {
+                    defaultValue: "上下文窗口",
+                  })}
                 </FormLabel>
                 <Input
                   id="grokbuild-context-window"
@@ -585,8 +609,47 @@ export function GrokBuildProviderForm({
                   })}
                 </p>
               )}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={Boolean(rawConfigError) || isApplyingProfile}
+                  onClick={applyProfileToLive}
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  {t("grokBuild.applyProfile", {
+                    defaultValue: "Apply profile to live config",
+                  })}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setIsGlobalConfigOpen(true)}
+                >
+                  <FileCog className="mr-2 h-4 w-4" />
+                  {t("grokBuild.editGlobalConfig", {
+                    defaultValue: "Edit global config.toml",
+                  })}
+                </Button>
+              </div>
             </div>
           </>
+        )}
+
+        {category === "official" && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => setIsGlobalConfigOpen(true)}
+          >
+            <FileCog className="mr-2 h-4 w-4" />
+            {t("grokBuild.editGlobalConfig", {
+              defaultValue: "Edit global config.toml",
+            })}
+          </Button>
         )}
 
         <FormField
@@ -613,6 +676,10 @@ export function GrokBuildProviderForm({
           </div>
         )}
       </form>
+      <GrokGlobalConfigModal
+        open={isGlobalConfigOpen}
+        onOpenChange={setIsGlobalConfigOpen}
+      />
     </Form>
   );
 }

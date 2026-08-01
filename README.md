@@ -12,15 +12,15 @@
 <a href="https://trendshift.io/repositories/15372" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15372" alt="farion1231%2Fcc-switch | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 <a href="https://www.star-history.com/#jiugjk/cc-switch&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=farion1231/cc-switch&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=farion1231/cc-switch" width="196" height="55" /></picture></a>
 
-### 🌐 The Only Official Website: **[ccswitch.io](https://ccswitch.io)**
+### 🌐 Upstream project website: **[ccswitch.io](https://ccswitch.io)**
 
 English | [中文](README_ZH.md) | [Changelog](CHANGELOG.md)
 
 </div>
 
-## 🔀 About This Fork
+## About This Distribution
 
-This repository is a fork of [farion1231/cc-switch](https://github.com/farion1231/cc-switch) that adds the following on top of upstream v3.19.1:
+This is an independently maintained Windows distribution derived from the MIT-licensed [farion1231/cc-switch](https://github.com/farion1231/cc-switch), with its own release cadence and the following additions on top of upstream v3.19.1:
 
 ### CodexCont & proxy
 
@@ -28,6 +28,7 @@ This repository is a fork of [farion1231/cc-switch](https://github.com/farion123
 - **Route observability** — `ProxyStatus` exposes last-route fields; General settings shows `ProxyStatusSummary` (active provider, last success/fail, fallback reason).
 - **Quota attribution** — Classifies quota-exhaustion errors and records `last_fallback_reason`; optional `decouple_official_quota` keeps official auth from forcing custom-API failover. No second independent “quota-fallback” switch — refinements go through the existing failover path.
 - **Provider capability resolver** — Declared/heuristic capability snapshot (including Chat = degraded continuation) for safer routing decisions.
+- **Guides** — [CodexCont behavior, cost and safety gates](docs/guides/codex-continuation-guide-en.md) ([中文](docs/guides/codex-continuation-guide-zh.md) · [日本語](docs/guides/codex-continuation-guide-ja.md)).
 
 ### Apps, detection & UI
 
@@ -36,10 +37,11 @@ This repository is a fork of [farion1231/cc-switch](https://github.com/farion123
 - **Localized environment-check text** — `not installed or not executable` follows the active UI language.
 - **Tool website links** — Shortcut next to each tool name opens its official site.
 - **Updated Windows install commands** — Per-tool one-click install commands refreshed.
+- **Grok Build configuration ownership** — Provider switching changes only model/endpoint profiles while preserving global TOML, MCP and future settings; supports `GROK_CONFIG` / `GROK_HOME`, full-file editing, privacy drafts and local restoreable backups. See the [configuration guide](docs/guides/grok-build-config-guide-en.md) ([中文](docs/guides/grok-build-config-guide-zh.md) · [日本語](docs/guides/grok-build-config-guide-ja.md)).
 
 ### Build
 
-- **Free Windows auto-build** — GitHub Actions builds **unsigned** NSIS / MSI / portable artifacts on free hosted runners after CI is green on `main` (or via `workflow_dispatch` on `main`). No macOS/Linux installers and no code signing / auto-update channel in this fork.
+- **Free Windows auto-build** — GitHub Actions builds **unsigned** NSIS / MSI / portable artifacts on free hosted runners after CI is green on `main` (or via `workflow_dispatch` on `main`). This distribution has no macOS/Linux installers and no code signing / auto-update channel.
 
 Open user-side checks: real e2e matrix with proxy on/off; live confirm that ChatGPT desktop traffic hits `127.0.0.1:15721` `/v1/responses` when takeover is enabled.
 
@@ -54,7 +56,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 - **Unified MCP & Skills Management** — One panel to manage MCP servers and Skills across Claude, Codex, Gemini, Grok Build, OpenCode, and Hermes with bidirectional sync
 - **System Tray Quick Switch** — Switch providers instantly from the tray menu, no need to open the full app
 - **Cloud Sync** — Sync provider data across devices via Dropbox, OneDrive, iCloud, or WebDAV servers
-- **Cross-Platform (upstream)** — Upstream supports Windows, macOS, and Linux; **this fork's published installers are Windows x64 only**
+- **Cross-Platform (upstream)** — Upstream supports Windows, macOS, and Linux; **this distribution's published installers are Windows x64 only**
 - **Built-in Utilities** — Includes various utilities for first-launch login confirmation, signature bypass, plugin extension sync, and more
 
 ## Screenshots
@@ -195,9 +197,9 @@ For detailed guides on every feature, check out the **[User Manual](docs/user-ma
 
 ### System Requirements
 
-- **This fork ships Windows x64 builds only** (Windows 10+). macOS / Linux packages are **not** published by `jiugjk/cc-switch` — use [upstream releases](https://github.com/farion1231/cc-switch/releases) if you need those platforms.
+- **This distribution ships Windows x64 builds only** (Windows 10+). macOS / Linux packages are **not** published by `jiugjk/cc-switch` — use [upstream releases](https://github.com/farion1231/cc-switch/releases) if you need those platforms.
 
-### Windows Users (this fork)
+### Windows Users
 
 Download the latest release from the [Releases](../../releases) page. Assets typically include:
 
@@ -209,8 +211,8 @@ Download the latest release from the [Releases](../../releases) page. Assets typ
 
 > **Notes**
 > - Builds are **unsigned** — Windows SmartScreen may warn; choose "Run anyway".
-> - No fork auto-update channel — the in-app updater is removed (`createUpdaterArtifacts` is false, no `plugins.updater` config, no signing key). "Check for Updates" opens this fork's releases page for manual download.
-> - Tags look like `v3.19.1-fork.<run_number>` and point at the commit that was built.
+> - No auto-update channel — the in-app updater is removed (`createUpdaterArtifacts` is false, no `plugins.updater` config, no signing key). "Check for Updates" opens this distribution's releases page for manual download.
+> - Automated build tags look like `v3.19.1-windows.<run_number>` and point at the commit that was built.
 
 <details>
 <summary><strong>Architecture Overview</strong></summary>
@@ -407,7 +409,9 @@ For new features, please open an issue for discussion before submitting a PR. PR
 
 ## Acknowledgments
 
-This project is a fork of [farion1231/cc-switch](https://github.com/farion1231/cc-switch) by Jason Young. Most of the product remains upstream work — thank you to the original author and contributors.
+This distribution is derived from the MIT-licensed [farion1231/cc-switch](https://github.com/farion1231/cc-switch) by Jason Young. Most of the product remains upstream work — thank you to the original author and contributors. Independent maintenance and release metadata do not remove the original copyright or license notices.
+
+The Grok Build global-configuration workflow was informed by the MIT-licensed [2836048681/cc-switch-codexcont](https://github.com/2836048681/cc-switch-codexcont); this implementation was adapted to this distribution's Responses-only proxy route, database-owned MCP projection, and existing transaction backup model.
 
 Sponsor listings are maintained upstream (not mirrored here): [upstream sponsors](https://github.com/farion1231/cc-switch#heartsponsor).
 
