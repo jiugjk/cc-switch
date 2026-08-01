@@ -17,7 +17,12 @@ pub fn ensure_test_home() -> &'static Path {
         std::env::set_var("CC_SWITCH_TEST_HOME", &base);
         std::env::set_var("HOME", &base);
         #[cfg(windows)]
-        std::env::set_var("USERPROFILE", &base);
+        {
+            std::env::set_var("USERPROFILE", &base);
+            let local_app_data = base.join("AppData").join("Local");
+            std::fs::create_dir_all(&local_app_data).expect("create test LOCALAPPDATA");
+            std::env::set_var("LOCALAPPDATA", local_app_data);
+        }
         base
     })
     .as_path()
@@ -35,6 +40,8 @@ pub fn reset_test_fs() {
         ".config",
         ".openclaw",
         "profiles",
+        "AppData/Local/Claude",
+        "AppData/Local/Claude-3p",
     ] {
         let path = home.join(sub);
         if path.exists() {

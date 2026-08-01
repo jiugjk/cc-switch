@@ -27,8 +27,10 @@ import {
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
 import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
+import { XaiOAuthSection } from "./XaiOAuthSection";
 import {
   fetchModelsForConfig,
+  fetchXaiOauthModels,
   showFetchModelsError,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -52,6 +54,11 @@ interface EndpointCandidate {
 interface CodexFormFieldsProps {
   appId?: AppId;
   providerId?: string;
+  // xAI OAuth 托管预设（Grok 订阅）：隐藏 API Key / 端点输入，挂账号选择区块
+  isXaiOauthPreset?: boolean;
+  isXaiOauthAuthenticated?: boolean;
+  selectedXaiAccountId?: string | null;
+  onXaiAccountSelect?: (accountId: string | null) => void;
   // API Key
   codexApiKey: string;
   onApiKeyChange: (key: string) => void;
@@ -159,6 +166,10 @@ function catalogRowsMatchModels(
 export function CodexFormFields({
   appId = "codex",
   providerId,
+  isXaiOauthPreset,
+  isXaiOauthAuthenticated,
+  selectedXaiAccountId,
+  onXaiAccountSelect,
   codexApiKey,
   onApiKeyChange,
   category,
@@ -212,7 +223,15 @@ export function CodexFormFields({
   useEffect(() => {
     fetchModelsSeqRef.current += 1;
     setFetchedModels((prev) => (prev.length === 0 ? prev : []));
-  }, [codexBaseUrl, isFullUrl, codexApiKey, customUserAgent]);
+  }, [
+    codexBaseUrl,
+    isFullUrl,
+    codexApiKey,
+    customUserAgent,
+    isXaiOauthPreset,
+    isXaiOauthAuthenticated,
+    selectedXaiAccountId,
+  ]);
   // 思考能力随 Chat 格式显示（仅 Chat Completions 转换路径用得上）；模型映射常驻
   //（填了才生成 catalog）。两者都已与「路由接管」概念解耦。
   const isChatFormat = apiFormat === "openai_chat";
@@ -239,14 +258,20 @@ export function CodexFormFields({
     supportsEffort ||
     promptCacheRouting !== "auto" ||
     !!maxOutputTokens;
-  const [advancedExpanded, setAdvancedExpanded] = useState(hasAnyAdvancedValue);
+  const [advancedExpanded, setAdvancedExpanded] = useState(
+    isXaiOauthPreset ? false : hasAnyAdvancedValue,
+  );
 
-  // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
+  // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）；
+  // xAI OAuth 托管预设的高级值都是预设自带的，无需展示，保持折叠
   useEffect(() => {
+    if (isXaiOauthPreset) {
+      return;
+    }
     if (hasAnyAdvancedValue) {
       setAdvancedExpanded(true);
     }
-  }, [hasAnyAdvancedValue]);
+  }, [hasAnyAdvancedValue, isXaiOauthPreset]);
 
   const [catalogRows, setCatalogRows] = useState<CodexCatalogRow[]>(() =>
     catalogModels.map((m) => createCatalogRow(m)),
@@ -307,6 +332,40 @@ export function CodexFormFields({
   );
 
   const handleFetchModels = useCallback(() => {
+    // xAI OAuth 托管预设：不走 base_url + key 的 /models 探测，
+    // 直接用托管账号 token 拉取（与 Claude 表单同一后端命令）
+    if (isXaiOauthPreset) {
+      if (!isXaiOauthAuthenticated) {
+        toast.error(
+          t("xaiOauth.loginRequired", {
+            defaultValue: "请先登录 xAI 账号",
+          }),
+        );
+        return;
+      }
+      const seq = ++fetchModelsSeqRef.current;
+      setIsFetchingModels(true);
+      fetchXaiOauthModels(selectedXaiAccountId ?? null)
+        .then((models) => {
+          if (seq !== fetchModelsSeqRef.current) return;
+          setFetchedModels(models);
+          if (models.length === 0) {
+            toast.info(t("providerForm.fetchModelsEmpty"));
+          } else {
+            toast.success(
+              t("providerForm.fetchModelsSuccess", { count: models.length }),
+            );
+          }
+        })
+        .catch((err) => {
+          if (seq !== fetchModelsSeqRef.current) return;
+          console.warn("[XaiOAuth] Failed to fetch models:", err);
+          showFetchModelsError(err, t);
+        })
+        .finally(() => setIsFetchingModels(false));
+      return;
+    }
+
     if (!codexBaseUrl || !codexApiKey) {
       showFetchModelsError(null, t, {
         hasApiKey: !!codexApiKey,
@@ -340,7 +399,16 @@ export function CodexFormFields({
         showFetchModelsError(err, t);
       })
       .finally(() => setIsFetchingModels(false));
-  }, [codexBaseUrl, codexApiKey, isFullUrl, customUserAgent, t]);
+  }, [
+    codexBaseUrl,
+    codexApiKey,
+    isFullUrl,
+    customUserAgent,
+    isXaiOauthPreset,
+    isXaiOauthAuthenticated,
+    selectedXaiAccountId,
+    t,
+  ]);
 
   const handleAddCatalogRow = useCallback(() => {
     if (!onCatalogModelsChange) return;
@@ -433,44 +501,46 @@ export function CodexFormFields({
 
   return (
     <>
-      {/* Codex API Key 输入框 */}
-      <ApiKeySection
-        id="codexApiKey"
-        label="API Key"
-        value={codexApiKey}
-        onChange={onApiKeyChange}
-        category={category}
-        shouldShowLink={shouldShowApiKeyLink}
-        websiteUrl={websiteUrl}
-        isPartner={isPartner}
-        partnerPromotionKey={partnerPromotionKey}
-        placeholder={{
-          official: t("providerForm.codexOfficialNoApiKey", {
-            defaultValue: "官方供应商无需 API Key",
-          }),
-          thirdParty: t("providerForm.codexApiKeyAutoFill", {
-            defaultValue: "输入 API Key，将自动填充到配置",
-          }),
-        }}
-      />
+      {/* xAI OAuth 认证（Grok 订阅托管账号） */}
+      {isXaiOauthPreset && (
+        <XaiOAuthSection
+          selectedAccountId={selectedXaiAccountId}
+          onAccountSelect={onXaiAccountSelect}
+        />
+      )}
 
-      {/* Codex Base URL 输入框。提示随「上游格式」联动：Responses 直连不转换；
-          Chat / Anthropic 端点需开启路由接管由本地路由转换为 Responses（与
-          ClaudeFormFields 的按格式提示同一模式）。 */}
-      {shouldShowSpeedTest && (
+      {/* Codex API Key 输入框（托管 OAuth 预设无需 Key） */}
+      {!isXaiOauthPreset && (
+        <ApiKeySection
+          id="codexApiKey"
+          label="API Key"
+          value={codexApiKey}
+          onChange={onApiKeyChange}
+          category={category}
+          shouldShowLink={shouldShowApiKeyLink}
+          websiteUrl={websiteUrl}
+          isPartner={isPartner}
+          partnerPromotionKey={partnerPromotionKey}
+          placeholder={{
+            official: t("providerForm.codexOfficialNoApiKey", {
+              defaultValue: "官方供应商无需 API Key",
+            }),
+            thirdParty: t("providerForm.codexApiKeyAutoFill", {
+              defaultValue: "输入 API Key，将自动填充到配置",
+            }),
+          }}
+        />
+      )}
+
+      {/* Codex Base URL 输入框（托管 OAuth 端点由 adapter 硬定向，不展示） */}
+      {shouldShowSpeedTest && !isXaiOauthPreset && (
         <EndpointField
           id="codexBaseUrl"
           label={t("codexConfig.apiUrlLabel")}
           value={codexBaseUrl}
           onChange={onBaseUrlChange}
           placeholder={t("providerForm.codexApiEndpointPlaceholder")}
-          hint={
-            apiFormat === "openai_chat"
-              ? t("providerForm.codexApiHintChat")
-              : apiFormat === "anthropic"
-                ? t("providerForm.codexApiHintAnthropic")
-                : t("providerForm.codexApiHint")
-          }
+          hint={t("providerForm.codexApiHint")}
           showFullUrlToggle
           isFullUrl={isFullUrl}
           onFullUrlChange={onFullUrlChange}
@@ -573,14 +643,15 @@ export function CodexFormFields({
             <p className="mt-1 ml-1 text-xs text-muted-foreground">
               {t("codexConfig.advancedSectionHint", {
                 defaultValue:
-                  "包含上游格式、模型映射、思考能力与自定义 User-Agent。使用 Chat Completions 或 Anthropic Messages 协议的供应商需开启路由接管才能使用。",
+                  "包含上游格式、模型映射、思考能力与自定义 User-Agent。使用 Chat Completions 协议的供应商需开启路由接管才能使用。",
               })}
             </p>
           )}
           <CollapsibleContent className="space-y-3 pt-3">
             {/* 上游格式 —— Chat 需开启路由接管（走代理转换），Responses 原生直连。
-                沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换。 */}
-            {shouldShowSpeedTest && (
+                沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换；
+                xAI OAuth 托管预设格式钉死 Responses，不可切换。 */}
+            {shouldShowSpeedTest && !isXaiOauthPreset && (
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <FormLabel htmlFor="codex-upstream-format">
@@ -603,17 +674,17 @@ export function CodexFormFields({
                     <SelectContent>
                       <SelectItem value="openai_chat">
                         {t("codexConfig.upstreamFormatChat", {
-                          defaultValue: "Chat Completions",
+                          defaultValue: "Chat Completions（需开启路由）",
                         })}
                       </SelectItem>
                       <SelectItem value="openai_responses">
                         {t("codexConfig.upstreamFormatResponses", {
-                          defaultValue: "Responses",
+                          defaultValue: "Responses（原生）",
                         })}
                       </SelectItem>
                       <SelectItem value="anthropic">
                         {t("codexConfig.upstreamFormatAnthropic", {
-                          defaultValue: "Anthropic Messages",
+                          defaultValue: "Anthropic Messages（需开启路由）",
                         })}
                       </SelectItem>
                     </SelectContent>

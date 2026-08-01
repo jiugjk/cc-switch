@@ -179,7 +179,7 @@ export function UniversalProviderFormModal({
     : undefined;
   const codexConfigJson = useMemo(() => {
     if (!codexEnabled) return null;
-    const model = models.codex?.model || "gpt-5.5";
+    const model = models.codex?.model || "gpt-5.6-sol";
     const reasoningEffort = models.codex?.reasoningEffort || "high";
     // 确保纯 origin 的 base_url 以 /v1 结尾（Codex 使用 OpenAI 兼容 API）
     const codexBaseUrl = normalizeCodexBaseUrl(baseUrl);
@@ -649,7 +649,7 @@ requires_openai_auth = true`;
                     onChange={(e) =>
                       updateModel("codex", "model", e.target.value)
                     }
-                    placeholder="gpt-5.5"
+                    placeholder="gpt-5.6-sol"
                   />
                 </div>
                 <div className="space-y-1">

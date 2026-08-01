@@ -20,7 +20,7 @@ English | [中文](README_ZH.md) | [Changelog](CHANGELOG.md)
 
 ## 🔀 About This Fork
 
-This repository is a fork of [farion1231/cc-switch](https://github.com/farion1231/cc-switch) that adds the following on top of upstream v3.17.0:
+This repository is a fork of [farion1231/cc-switch](https://github.com/farion1231/cc-switch) that adds the following on top of upstream v3.19.1:
 
 ### CodexCont & proxy
 
@@ -65,7 +65,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 
 ## Features
 
-[Full Changelog](CHANGELOG.md) | [Release Notes](docs/release-notes/v3.16.1-en.md)
+[Full Changelog](CHANGELOG.md) | [Release Notes](docs/release-notes/v3.19.1-en.md)
 
 ### Provider Management
 
@@ -210,7 +210,7 @@ Download the latest release from the [Releases](../../releases) page. Assets typ
 > **Notes**
 > - Builds are **unsigned** — Windows SmartScreen may warn; choose "Run anyway".
 > - No fork auto-update channel — the in-app updater is removed (`createUpdaterArtifacts` is false, no `plugins.updater` config, no signing key). "Check for Updates" opens this fork's releases page for manual download.
-> - Tags look like `v3.17.0-fork.<run_number>` and point at the commit that was built.
+> - Tags look like `v3.19.1-fork.<run_number>` and point at the commit that was built.
 
 <details>
 <summary><strong>Architecture Overview</strong></summary>

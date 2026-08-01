@@ -20,7 +20,7 @@
 
 ## 🔀 关于本 Fork
 
-本仓库 fork 自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，在上游 v3.17.0 基础上新增以下功能：
+本仓库 fork 自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，在上游 v3.19.1 基础上新增以下功能：
 
 ### CodexCont 与代理
 
@@ -65,7 +65,7 @@
 
 ## 功能特性
 
-[完整更新日志](CHANGELOG.md) | [发布说明](docs/release-notes/v3.16.1-zh.md)
+[完整更新日志](CHANGELOG.md) | [发布说明](docs/release-notes/v3.19.1-zh.md)
 
 ### 供应商管理
 
@@ -212,7 +212,7 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 > **说明**
 > - **未代码签名**：Windows SmartScreen 可能提示，选「仍要运行」即可。
 > - **无自动更新通道**：本 fork 已移除应用内更新器（`createUpdaterArtifacts` 为 false、无 `plugins.updater` 配置、无签名密钥），「检查更新」会打开本 fork 的发布页手动下载。
-> - 标签形如 `v3.17.0-fork.<run_number>`，并指向实际构建的提交。
+> - 标签形如 `v3.19.1-fork.<run_number>`，并指向实际构建的提交。
 
 <details>
 <summary><strong>架构总览</strong></summary>

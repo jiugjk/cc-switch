@@ -84,19 +84,18 @@ describe("DeepLinkImportDialog", () => {
     // Config preview section appears (previously null for hermes)
     await screen.findByText("deeplink.configDetails");
 
-    // Embedded sensitive entry is masked (4-char prefix + 8 stars + 2-char suffix)
-    expect(screen.getByText(`sk-e${"*".repeat(8)}ey`)).toBeInTheDocument();
-    expect(screen.queryByText("sk-embedded-secret-key")).toBeNull();
+    const preview = screen.getByTestId("deeplink-generic-config-preview");
+    expect(preview.textContent).toContain(`sk-e${"*".repeat(12)}`);
+    expect(preview.textContent).not.toContain("sk-embedded-secret-key");
+    expect(preview.textContent).toContain("baseUrl");
+    expect(preview.textContent).toContain("https://hermes.example.com");
 
-    // Non-sensitive entry is shown verbatim
-    expect(screen.getByText("baseUrl")).toBeInTheDocument();
-
-    // Main API key goes through maskSecret
-    expect(screen.getByText(`sk-h${"*".repeat(8)}56`)).toBeInTheDocument();
+    // Main API key uses the shared deeplink masking policy.
+    expect(screen.getByText(`sk-h${"*".repeat(12)}`)).toBeInTheDocument();
     expect(screen.queryByText("sk-hermes-full-key-123456")).toBeNull();
 
     // Short usage API key is fully masked, never shown verbatim
-    expect(screen.getByText("***")).toBeInTheDocument();
+    expect(screen.getByText("****")).toBeInTheDocument();
     expect(screen.queryByText("short1")).toBeNull();
   });
 
@@ -118,7 +117,7 @@ describe("DeepLinkImportDialog", () => {
       expect(screen.getByText("Plain Hermes")).toBeInTheDocument(),
     );
     // Short main API key is fully masked (unified helper), not shown verbatim
-    expect(screen.getByText("***")).toBeInTheDocument();
+    expect(screen.getByText("****")).toBeInTheDocument();
     expect(screen.queryByText("tiny")).toBeNull();
     // No config preview section without config
     expect(screen.queryByText("deeplink.configDetails")).toBeNull();

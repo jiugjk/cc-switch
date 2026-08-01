@@ -89,7 +89,7 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
 }
 
 #[test]
-fn deeplink_redaction_never_exposes_secrets() {
+fn generic_url_redaction_never_exposes_deeplink_secrets() {
     // Query values carry secrets: apiKey / usageApiKey / usageAccessToken /
     // base64 config blob ("Y2ZnLXNlbnRpbmVs" == "cfg-sentinel").
     let url = "ccswitch://v1/import?resource=provider&app=claude&apiKey=sk-sentinel-123&usageApiKey=uk-sentinel-456&usageAccessToken=uat-sentinel-789&config=Y2ZnLXNlbnRpbmVs";
@@ -114,17 +114,10 @@ fn deeplink_redaction_never_exposes_secrets() {
         "redacted: {redacted}"
     );
 
-    // Scheme/host/path and the sorted query-key list stay for debugging.
-    assert!(
-        redacted.starts_with("ccswitch://v1/import"),
-        "redacted: {redacted}"
-    );
-    assert!(redacted.contains("?[keys:"), "redacted: {redacted}");
-    assert!(redacted.contains("apiKey"), "redacted: {redacted}");
-    assert!(
-        redacted.contains("usageAccessToken"),
-        "redacted: {redacted}"
-    );
+    // The shared URL logger keeps the route for debugging and drops the whole
+    // query. Deep-link error payloads use their own key-only representation,
+    // which is covered separately below.
+    assert_eq!(redacted, "ccswitch://v1/import");
 }
 
 #[test]
