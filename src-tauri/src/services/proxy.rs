@@ -388,23 +388,224 @@ impl ProxyService {
         &self,
         provider: &Provider,
     ) -> Result<(), String> {
-        let existing_live = self.read_grok_live().ok();
+        let existing_live = self.read_grok_live()?;
         let mut effective_settings = build_effective_settings_with_common_config(
             self.db.as_ref(),
             &AppType::GrokBuild,
             provider,
         )
         .map_err(|e| format!("构建 Grok Build 有效配置失败: {e}"))?;
-        if let Some(existing_live) = existing_live.as_ref() {
-            Self::preserve_toml_mcp_servers_from_existing_config(
-                &mut effective_settings,
-                existing_live,
-            )?;
-        }
+        Self::merge_grok_profile_onto_existing_config(&mut effective_settings, &existing_live)?;
         let (proxy_url, _) = self.build_proxy_urls().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
         Self::apply_grok_takeover_fields(&mut effective_settings, &proxy_grok_base_url)?;
         self.write_grok_live(&effective_settings)
+    }
+
+    fn grok_config_text<'a>(settings: &'a Value, context: &str) -> Result<&'a str, String> {
+        settings
+            .get("config")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{context}缺少 config 字段"))
+    }
+
+    fn replace_grok_config_text(
+        settings: &mut Value,
+        content: String,
+        context: &str,
+    ) -> Result<(), String> {
+        settings
+            .as_object_mut()
+            .ok_or_else(|| format!("{context}必须是 JSON 对象"))?
+            .insert("config".to_string(), Value::String(content));
+        Ok(())
+    }
+
+    /// Replace only provider-owned Grok fields in a complete existing config.
+    /// The target starts as a provider snapshot; after this call it contains
+    /// every global, unknown, and MCP field from `existing_settings` as well.
+    fn merge_grok_profile_onto_existing_config(
+        target_settings: &mut Value,
+        existing_settings: &Value,
+    ) -> Result<(), String> {
+        let provider_profile = Self::grok_config_text(target_settings, "Grok Build 供应商配置")?;
+        let existing_full = Self::grok_config_text(existing_settings, "Grok Build 现有配置")?;
+        let merged =
+            crate::grok_config::merge_provider_profile_config_text(existing_full, provider_profile)
+                .map_err(|e| format!("合并 Grok Build 全局配置失败: {e}"))?;
+        Self::replace_grok_config_text(target_settings, merged, "Grok Build 供应商配置")
+    }
+
+    async fn persist_grok_takeover_config_pair(
+        &self,
+        previous_backup_json: &str,
+        next_restore_settings: &Value,
+        next_live_content: String,
+    ) -> Result<(), String> {
+        let next_backup_json = serde_json::to_string(next_restore_settings)
+            .map_err(|e| format!("序列化 Grok Build 恢复备份失败: {e}"))?;
+        self.db
+            .save_live_backup(AppType::GrokBuild.as_str(), &next_backup_json)
+            .await
+            .map_err(|e| format!("更新 Grok Build 恢复备份失败: {e}"))?;
+
+        if let Err(write_error) = self.write_grok_live(&json!({ "config": next_live_content })) {
+            let rollback_error = self
+                .db
+                .save_live_backup(AppType::GrokBuild.as_str(), previous_backup_json)
+                .await
+                .err();
+            return match rollback_error {
+                Some(rollback_error) => Err(format!(
+                    "{write_error}；回滚 Grok Build 恢复备份也失败: {rollback_error}"
+                )),
+                None => Err(write_error),
+            };
+        }
+        Ok(())
+    }
+
+    async fn grok_takeover_backup_pair(&self) -> Result<(String, Value, Value), String> {
+        let backup = self
+            .db
+            .get_live_backup(AppType::GrokBuild.as_str())
+            .await
+            .map_err(|e| format!("读取 Grok Build 恢复备份失败: {e}"))?
+            .ok_or_else(|| "Grok Build 正在接管，但恢复备份不存在；已拒绝修改配置".to_string())?;
+        let restore_settings: Value = serde_json::from_str(&backup.original_config)
+            .map_err(|e| format!("解析 Grok Build 恢复备份失败: {e}"))?;
+        if Self::is_grok_live_taken_over(&restore_settings) {
+            return Err("Grok Build 恢复备份包含代理占位符；已拒绝覆盖可恢复配置".to_string());
+        }
+        let live_settings = self.read_grok_live()?;
+        Ok((backup.original_config, restore_settings, live_settings))
+    }
+
+    async fn grok_takeover_ownership_active(&self) -> Result<bool, String> {
+        let enabled = self
+            .db
+            .get_proxy_config_for_app(AppType::GrokBuild.as_str())
+            .await
+            .map_err(|e| format!("读取 Grok Build 接管状态失败: {e}"))?
+            .enabled;
+        Ok(enabled || self.detect_takeover_in_live_config_for_app(&AppType::GrokBuild))
+    }
+
+    async fn rebuild_grok_takeover_live(&self, direct_config: &str) -> Result<String, String> {
+        let (proxy_url, _) = self.build_proxy_urls().await?;
+        let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
+        crate::grok_config::apply_proxy_takeover(
+            direct_config,
+            &proxy_grok_base_url,
+            PROXY_TOKEN_PLACEHOLDER,
+        )
+        .map_err(|e| format!("重建 Grok Build 接管配置失败: {e}"))
+    }
+
+    /// Save the complete Grok editor draft without allowing it to replace the
+    /// takeover-owned provider profile. During takeover the direct profile is
+    /// retained in the restore backup and the proxy profile remains in live.
+    pub async fn write_grok_global_config(&self, content: String) -> Result<String, String> {
+        let _guard = self
+            .switch_locks
+            .lock_for_app(AppType::GrokBuild.as_str())
+            .await;
+        crate::grok_config::validate_config_toml_syntax(&content).map_err(|e| e.to_string())?;
+
+        if !self.grok_takeover_ownership_active().await? {
+            self.write_grok_live(&json!({ "config": content.clone() }))?;
+            return Ok(content);
+        }
+
+        let (previous_backup_json, mut restore_settings, _live_settings) =
+            self.grok_takeover_backup_pair().await?;
+        let restore_profile = Self::grok_config_text(&restore_settings, "Grok Build 恢复备份")?;
+        let next_restore =
+            crate::grok_config::merge_provider_profile_config_text(&content, restore_profile)
+                .map_err(|e| format!("合并 Grok Build 恢复配置失败: {e}"))?;
+        let next_live = self.rebuild_grok_takeover_live(&next_restore).await?;
+        Self::replace_grok_config_text(&mut restore_settings, next_restore, "Grok Build 恢复备份")?;
+        self.persist_grok_takeover_config_pair(
+            &previous_backup_json,
+            &restore_settings,
+            next_live.clone(),
+        )
+        .await?;
+        Ok(next_live)
+    }
+
+    pub async fn restore_grok_global_config_backup(
+        &self,
+        filename: &str,
+    ) -> Result<String, String> {
+        let _guard = self
+            .switch_locks
+            .lock_for_app(AppType::GrokBuild.as_str())
+            .await;
+        if !self.grok_takeover_ownership_active().await? {
+            return crate::grok_config::restore_grok_config_backup(filename)
+                .map_err(|e| e.to_string());
+        }
+
+        let selected =
+            crate::grok_config::read_grok_config_backup(filename).map_err(|e| e.to_string())?;
+        let (previous_backup_json, mut restore_settings, _live_settings) =
+            self.grok_takeover_backup_pair().await?;
+        let restore_profile = Self::grok_config_text(&restore_settings, "Grok Build 恢复备份")?;
+        let next_restore =
+            crate::grok_config::merge_provider_profile_config_text(&selected, restore_profile)
+                .map_err(|e| format!("恢复 Grok Build 全局配置失败: {e}"))?;
+        let next_live = self.rebuild_grok_takeover_live(&next_restore).await?;
+        Self::replace_grok_config_text(&mut restore_settings, next_restore, "Grok Build 恢复备份")?;
+        self.persist_grok_takeover_config_pair(
+            &previous_backup_json,
+            &restore_settings,
+            next_live.clone(),
+        )
+        .await?;
+        Ok(next_live)
+    }
+
+    pub async fn merge_grok_profile_into_global_config(
+        &self,
+        profile_content: String,
+    ) -> Result<String, String> {
+        let _guard = self
+            .switch_locks
+            .lock_for_app(AppType::GrokBuild.as_str())
+            .await;
+        crate::grok_config::validate_config_toml(&profile_content).map_err(|e| e.to_string())?;
+
+        if !self.grok_takeover_ownership_active().await? {
+            let path = crate::grok_config::get_grok_config_path();
+            let live = if path.exists() {
+                std::fs::read_to_string(&path)
+                    .map_err(|e| format!("读取 Grok Build 现有配置失败: {e}"))?
+            } else {
+                String::new()
+            };
+            let merged =
+                crate::grok_config::merge_provider_profile_config_text(&live, &profile_content)
+                    .map_err(|e| e.to_string())?;
+            self.write_grok_live(&json!({ "config": merged.clone() }))?;
+            return Ok(merged);
+        }
+
+        let (previous_backup_json, mut restore_settings, live_settings) =
+            self.grok_takeover_backup_pair().await?;
+        let live = Self::grok_config_text(&live_settings, "Grok Build 接管配置")?;
+        let next_restore =
+            crate::grok_config::merge_provider_profile_config_text(live, &profile_content)
+                .map_err(|e| e.to_string())?;
+        let next_live = self.rebuild_grok_takeover_live(&next_restore).await?;
+        Self::replace_grok_config_text(&mut restore_settings, next_restore, "Grok Build 恢复备份")?;
+        self.persist_grok_takeover_config_pair(
+            &previous_backup_json,
+            &restore_settings,
+            next_live.clone(),
+        )
+        .await?;
+        Ok(next_live)
     }
 
     fn get_current_provider_for_app(&self, app_type: &AppType) -> Result<Option<Provider>, String> {
@@ -2162,9 +2363,15 @@ impl ProxyService {
         }
 
         // A valid provider snapshot should normally restore before this fallback.
-        // Clearing the token prevents a stale local route from looking usable.
-        let updated = crate::grok_config::update_api_key(config_toml, "")
-            .map_err(|e| format!("清理 Grok Build 接管占位符失败: {e}"))?;
+        // Clear takeover-owned fields from every profile and the shared endpoint;
+        // leaving even one secondary model on localhost keeps the broken takeover
+        // detectable and can route subagent traffic to a stopped proxy.
+        let updated = crate::grok_config::remove_proxy_takeover_fields(
+            config_toml,
+            PROXY_TOKEN_PLACEHOLDER,
+            Self::is_local_proxy_url,
+        )
+        .map_err(|e| format!("清理 Grok Build 接管占位符失败: {e}"))?;
         crate::config::write_text_file(&crate::grok_config::get_grok_config_path(), &updated)
             .map_err(|e| format!("写入 Grok Build 配置失败: {e}"))
     }
@@ -2326,7 +2533,7 @@ impl ProxyService {
     }
 
     /// 仅供已持有 per-app 切换锁的调用方使用。
-    async fn update_live_backup_from_provider_inner(
+    pub(crate) async fn update_live_backup_from_provider_inner(
         &self,
         app_type: &str,
         provider: &Provider,
@@ -2390,7 +2597,7 @@ impl ProxyService {
                 .transpose()?
                 .or_else(|| self.read_grok_live().ok());
             if let Some(existing_value) = existing_value.as_ref() {
-                Self::preserve_toml_mcp_servers_from_existing_config(
+                Self::merge_grok_profile_onto_existing_config(
                     &mut effective_settings,
                     existing_value,
                 )?;
@@ -7180,7 +7387,7 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("set local current");
         let mut original_settings = provider_a.settings_config.clone();
         original_settings["config"] = json!(format!(
-            "{}\n[mcp_servers.demo]\ncommand = \"demo\"\n",
+            "{}\n[features]\ntelemetry = false\n\n[harness]\nfuture_flag = \"keep\"\n\n[mcp_servers.demo]\ncommand = \"demo\"\n",
             original_settings["config"]
                 .as_str()
                 .expect("provider config")
@@ -7191,6 +7398,17 @@ experimental_bearer_token = "PROXY_MANAGED"
         )
         .await
         .expect("seed backup");
+        let takeover = crate::grok_config::apply_proxy_takeover(
+            original_settings["config"]
+                .as_str()
+                .expect("complete original config"),
+            "http://127.0.0.1:15721/grokbuild/v1",
+            PROXY_TOKEN_PLACEHOLDER,
+        )
+        .expect("build takeover live");
+        service
+            .write_grok_live(&json!({ "config": takeover }))
+            .expect("seed takeover live");
 
         service
             .hot_switch_provider("grokbuild", "grok-b")
@@ -7215,6 +7433,307 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert!(backup["config"]
             .as_str()
             .is_some_and(|config| config.contains("[mcp_servers.demo]")));
+        assert!(backup["config"]
+            .as_str()
+            .is_some_and(|config| config.contains("telemetry = false")));
+        assert!(backup["config"]
+            .as_str()
+            .is_some_and(|config| config.contains("future_flag = \"keep\"")));
+
+        let live = service.read_grok_live().expect("read takeover live");
+        let live = live["config"].as_str().expect("live config text");
+        assert!(live.contains("telemetry = false"));
+        assert!(live.contains("future_flag = \"keep\""));
+        assert!(live.contains("[mcp_servers.demo]"));
+        assert!(live.contains(PROXY_TOKEN_PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn grok_global_save_repairs_enabled_takeover_with_missing_live_marker() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let direct = format!(
+            "{}\n[features]\ntelemetry = true\n\n[harness]\nfuture_flag = \"before\"\n",
+            grok_provider_config("https://direct.example/v1", "real-key")["config"]
+                .as_str()
+                .expect("provider config")
+        );
+        let restore_settings = json!({ "config": direct });
+        let restore_json =
+            serde_json::to_string(&restore_settings).expect("serialize restore backup");
+        db.save_live_backup("grokbuild", &restore_json)
+            .await
+            .expect("seed restore backup");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("grokbuild")
+            .await
+            .expect("read Grok Build proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Grok Build takeover enabled");
+
+        // Simulate Grok or an external editor rewriting a logically active
+        // takeover file and removing every marker.
+        service
+            .write_grok_live(&restore_settings)
+            .expect("seed markerless live");
+        assert!(!service.detect_takeover_in_live_config_for_app(&AppType::GrokBuild));
+
+        let edited = service.read_grok_live().expect("read markerless live")["config"]
+            .as_str()
+            .expect("markerless text")
+            .replace("telemetry = true", "telemetry = false")
+            .replace("future_flag = \"before\"", "future_flag = \"after\"");
+        service
+            .write_grok_global_config(edited)
+            .await
+            .expect("save global draft during takeover");
+
+        let backup = db
+            .get_live_backup("grokbuild")
+            .await
+            .expect("read restore backup")
+            .expect("restore backup exists");
+        let backup: Value = serde_json::from_str(&backup.original_config).expect("parse backup");
+        let backup_text = backup["config"].as_str().expect("backup text");
+        assert!(backup_text.contains("https://direct.example/v1"));
+        assert!(backup_text.contains("api_key = \"real-key\""));
+        assert!(!backup_text.contains(PROXY_TOKEN_PLACEHOLDER));
+        assert!(backup_text.contains("telemetry = false"));
+        assert!(backup_text.contains("future_flag = \"after\""));
+
+        let live = service.read_grok_live().expect("read saved live");
+        let live_text = live["config"].as_str().expect("live text");
+        assert!(live_text.contains(PROXY_TOKEN_PLACEHOLDER));
+        assert!(live_text.contains("http://127.0.0.1:15721/grokbuild/v1"));
+        assert!(live_text.contains("telemetry = false"));
+        assert!(live_text.contains("future_flag = \"after\""));
+
+        service
+            .set_takeover_for_app("grokbuild", false)
+            .await
+            .expect("stop takeover");
+        let restored = service.read_grok_live().expect("read restored live");
+        let restored = restored["config"].as_str().expect("restored text");
+        assert!(restored.contains("https://direct.example/v1"));
+        assert!(restored.contains("api_key = \"real-key\""));
+        assert!(restored.contains("telemetry = false"));
+        assert!(restored.contains("future_flag = \"after\""));
+        assert!(!restored.contains(PROXY_TOKEN_PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn grok_backup_restore_repairs_enabled_takeover_with_missing_live_marker() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let direct = format!(
+            "{}\n[features]\ntelemetry = true\n\n[harness]\nfuture_flag = \"current\"\n",
+            grok_provider_config("https://direct.example/v1", "real-key")["config"]
+                .as_str()
+                .expect("provider config")
+        );
+        let selected_backup = direct
+            .replace("telemetry = true", "telemetry = false")
+            .replace("future_flag = \"current\"", "future_flag = \"restored\"");
+        crate::grok_config::write_grok_live_settings(&json!({ "config": selected_backup.clone() }))
+            .expect("seed selected backup source");
+        crate::grok_config::write_grok_live_settings(&json!({ "config": direct.clone() }))
+            .expect("create selected local backup");
+        let filename = crate::grok_config::list_grok_config_backups()
+            .expect("list local backups")
+            .into_iter()
+            .find(|backup| {
+                std::fs::read_to_string(&backup.path).ok().as_deref()
+                    == Some(selected_backup.as_str())
+            })
+            .expect("selected backup exists")
+            .filename;
+
+        let restore_settings = json!({ "config": direct });
+        db.save_live_backup(
+            "grokbuild",
+            &serde_json::to_string(&restore_settings).expect("serialize restore backup"),
+        )
+        .await
+        .expect("seed restore backup");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("grokbuild")
+            .await
+            .expect("read Grok Build proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Grok Build takeover enabled");
+        service
+            .write_grok_live(&restore_settings)
+            .expect("seed markerless live");
+        assert!(!service.detect_takeover_in_live_config_for_app(&AppType::GrokBuild));
+
+        let returned = service
+            .restore_grok_global_config_backup(&filename)
+            .await
+            .expect("restore local backup during takeover");
+        let actual_live = service.read_grok_live().expect("read actual live");
+        assert_eq!(actual_live["config"].as_str(), Some(returned.as_str()));
+        assert!(returned.contains(PROXY_TOKEN_PLACEHOLDER));
+        assert!(returned.contains("telemetry = false"));
+        assert!(returned.contains("future_flag = \"restored\""));
+
+        let db_backup = db
+            .get_live_backup("grokbuild")
+            .await
+            .expect("read DB restore backup")
+            .expect("DB restore backup exists");
+        let db_backup: Value =
+            serde_json::from_str(&db_backup.original_config).expect("parse DB restore backup");
+        let db_backup = db_backup["config"].as_str().expect("DB backup text");
+        assert!(db_backup.contains("https://direct.example/v1"));
+        assert!(db_backup.contains("api_key = \"real-key\""));
+        assert!(db_backup.contains("telemetry = false"));
+        assert!(db_backup.contains("future_flag = \"restored\""));
+        assert!(!db_backup.contains(PROXY_TOKEN_PLACEHOLDER));
+
+        service
+            .set_takeover_for_app("grokbuild", false)
+            .await
+            .expect("stop takeover restore");
+        let after_stop = service.read_grok_live().expect("read restored direct live");
+        let after_stop = after_stop["config"].as_str().expect("restored text");
+        assert!(after_stop.contains("telemetry = false"));
+        assert!(after_stop.contains("future_flag = \"restored\""));
+        assert!(after_stop.contains("https://direct.example/v1"));
+        assert!(!after_stop.contains(PROXY_TOKEN_PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn grok_apply_profile_repairs_enabled_takeover_with_missing_live_marker() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let direct_a = format!(
+            "{}\n[features]\ntelemetry = true\n\n[harness]\nfuture_flag = \"backup\"\n",
+            grok_provider_config("https://a.example/v1", "a-key")["config"]
+                .as_str()
+                .expect("provider A config")
+        );
+        let restore_settings = json!({ "config": direct_a });
+        db.save_live_backup(
+            "grokbuild",
+            &serde_json::to_string(&restore_settings).expect("serialize restore backup"),
+        )
+        .await
+        .expect("seed restore backup");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("grokbuild")
+            .await
+            .expect("read Grok Build proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Grok Build takeover enabled");
+
+        let markerless_live = restore_settings["config"]
+            .as_str()
+            .expect("direct A config")
+            .replace("telemetry = true", "telemetry = false")
+            .replace("future_flag = \"backup\"", "future_flag = \"external\"");
+        service
+            .write_grok_live(&json!({ "config": markerless_live }))
+            .expect("seed externally rewritten markerless live");
+        assert!(!service.detect_takeover_in_live_config_for_app(&AppType::GrokBuild));
+
+        let profile_b = grok_provider_config("https://b.example/v1", "b-key")["config"]
+            .as_str()
+            .expect("provider B config")
+            .to_string();
+        let returned = service
+            .merge_grok_profile_into_global_config(profile_b)
+            .await
+            .expect("apply profile while marker is missing");
+        assert!(returned.contains(PROXY_TOKEN_PLACEHOLDER));
+        assert!(returned.contains("telemetry = false"));
+        assert!(returned.contains("future_flag = \"external\""));
+        assert_eq!(
+            service
+                .read_grok_live()
+                .expect("read rebuilt takeover live")["config"]
+                .as_str(),
+            Some(returned.as_str())
+        );
+
+        let backup = db
+            .get_live_backup("grokbuild")
+            .await
+            .expect("read updated restore backup")
+            .expect("updated restore backup exists");
+        let backup: Value = serde_json::from_str(&backup.original_config).expect("parse backup");
+        let backup = backup["config"].as_str().expect("backup text");
+        assert!(backup.contains("https://b.example/v1"));
+        assert!(backup.contains("api_key = \"b-key\""));
+        assert!(backup.contains("telemetry = false"));
+        assert!(backup.contains("future_flag = \"external\""));
+        assert!(!backup.contains(PROXY_TOKEN_PLACEHOLDER));
+
+        service
+            .set_takeover_for_app("grokbuild", false)
+            .await
+            .expect("stop takeover");
+        let after_stop = service.read_grok_live().expect("read restored direct live");
+        let after_stop = after_stop["config"].as_str().expect("restored text");
+        assert!(after_stop.contains("https://b.example/v1"));
+        assert!(after_stop.contains("api_key = \"b-key\""));
+        assert!(after_stop.contains("telemetry = false"));
+        assert!(after_stop.contains("future_flag = \"external\""));
+        assert!(!after_stop.contains(PROXY_TOKEN_PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn grok_enabled_markerless_takeover_without_restore_backup_rejects_global_write() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let markerless = format!(
+            "{}\n[features]\ntelemetry = true\n",
+            grok_provider_config("https://direct.example/v1", "real-key")["config"]
+                .as_str()
+                .expect("provider config")
+        );
+        service
+            .write_grok_live(&json!({ "config": markerless.clone() }))
+            .expect("seed markerless live");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("grokbuild")
+            .await
+            .expect("read Grok Build proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Grok Build takeover enabled");
+
+        let error = service
+            .write_grok_global_config(markerless.replace("true", "false"))
+            .await
+            .expect_err("missing direct restore backup must reject the write");
+        assert!(error.contains("恢复备份不存在"));
+        assert_eq!(
+            service.read_grok_live().expect("read unchanged live")["config"].as_str(),
+            Some(markerless.as_str())
+        );
     }
 
     #[tokio::test]

@@ -902,11 +902,28 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    // Native Responses passthrough to a strict gateway (xAI): the request-side
-    // flatten (in the forwarder) turned Codex `namespace` tools into flat
-    // function tools, so the upstream returns flat function-call names. Restore
-    // them to `{name, namespace}` so the Codex client matches them against its
-    // namespaced tool registry.
+    if codex_continue_enabled && response.is_sse() {
+        let folded = super::codex_continue::build_folded_proxy_response(
+            super::codex_continue::FoldedProxyResponseArgs {
+                first_response: response,
+                first_connection_guard: connection_guard,
+                forwarder,
+                method,
+                endpoint: endpoint.clone(),
+                base_body: original_body,
+                headers: original_headers,
+                extensions: original_extensions,
+                providers,
+                config: codex_continue_config,
+                first_provider: ctx.provider.clone(),
+                first_outbound_model: ctx.outbound_model.clone(),
+            },
+        );
+        return build_codex_folded_stream_response(folded, &ctx, &state);
+    }
+
+    // Non-folded native Responses passthrough to a strict gateway (xAI). Folded streams perform
+    // this restoration inside codex_continue for each round's actual provider.
     if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
         && !namespace_restore_map.is_empty()
     {
@@ -920,24 +937,6 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    if codex_continue_enabled && response.is_sse() {
-        let response = super::codex_continue::build_folded_proxy_response(
-            super::codex_continue::FoldedProxyResponseArgs {
-                first_response: response,
-                first_connection_guard: connection_guard,
-                forwarder,
-                method,
-                endpoint: endpoint.clone(),
-                base_body: original_body,
-                headers: original_headers,
-                extensions: original_extensions,
-                providers,
-                config: codex_continue_config,
-            },
-        );
-        return build_codex_folded_stream_response(response, &ctx, &state);
-    }
-
     process_response(
         response,
         &ctx,
@@ -949,10 +948,11 @@ async fn handle_responses_for_app(
 }
 
 fn build_codex_folded_stream_response(
-    response: super::hyper_client::ProxyResponse,
+    folded: super::codex_continue::FoldedProxyResponse,
     ctx: &RequestContext,
     state: &ProxyState,
 ) -> Result<axum::response::Response, ProxyError> {
+    let response = folded.response;
     let status = response.status();
     let mut response_headers = response.headers().clone();
     strip_hop_by_hop_response_headers(&mut response_headers);
@@ -962,7 +962,8 @@ fn build_codex_folded_stream_response(
         builder = builder.header(key, value);
     }
 
-    let usage_collector = create_codex_folded_usage_collector(ctx, state, status.as_u16());
+    let usage_collector =
+        create_codex_folded_usage_collector(ctx, state, status.as_u16(), folded.attribution);
     let body = axum::body::Body::from_stream(create_logged_passthrough_stream(
         response.bytes_stream(),
         ctx.tag,
@@ -980,6 +981,7 @@ fn create_codex_folded_usage_collector(
     ctx: &RequestContext,
     state: &ProxyState,
     status_code: u16,
+    attribution: super::codex_continue::CodexContinueAttribution,
 ) -> Option<SseUsageCollector> {
     if !usage_logging_enabled(state) {
         return None;
@@ -1000,6 +1002,62 @@ fn create_codex_folded_usage_collector(
         start_time,
         Some(codex_stream_usage_event_filter),
         move |events, first_token_ms| {
+            let round_attribution = attribution.snapshot();
+            let mut logged_attributed_round = false;
+            for round in round_attribution {
+                let Some(round_usage) = round.usage else {
+                    continue;
+                };
+                let response_model = round.response_model.filter(|model| !model.is_empty());
+                let outbound_model = round
+                    .outbound_model
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or_else(|| request_model.clone());
+                let synthetic_response = json!({
+                    "usage": round_usage,
+                    "model": response_model.clone().unwrap_or_else(|| outbound_model.clone()),
+                });
+                let Some(usage) = TokenUsage::from_codex_response_auto(&synthetic_response)
+                    .filter(TokenUsage::has_billable_tokens)
+                else {
+                    continue;
+                };
+
+                logged_attributed_round = true;
+                let model = usage
+                    .model
+                    .clone()
+                    .filter(|model| !model.is_empty())
+                    .or(response_model)
+                    .unwrap_or_else(|| outbound_model.clone());
+                let latency_ms = start_time.elapsed().as_millis() as u64;
+                let state = state.clone();
+                let request_model = request_model.clone();
+                let session_id = session_id.clone();
+                let round_first_token_ms = (round.round == 1).then_some(first_token_ms).flatten();
+
+                tokio::spawn(async move {
+                    log_usage(
+                        &state,
+                        &round.provider_id,
+                        app_type_str,
+                        &model,
+                        &request_model,
+                        &outbound_model,
+                        usage,
+                        latency_ms,
+                        round_first_token_ms,
+                        true,
+                        status_code,
+                        Some(session_id),
+                    )
+                    .await;
+                });
+            }
+            if logged_attributed_round {
+                return;
+            }
+
             let Some(usage) = TokenUsage::from_codex_stream_events_auto(&events)
                 .filter(TokenUsage::has_billable_tokens)
             else {
@@ -1349,7 +1407,7 @@ async fn handle_codex_chat_to_responses_transform(
         return handle_codex_chat_error_response(response, ctx, status).await;
     }
 
-    if is_stream || response.is_sse() {
+    if should_return_chat_transform_as_sse(is_stream, response.is_sse()) {
         let stream = response.bytes_stream();
         let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
@@ -1563,6 +1621,11 @@ async fn handle_codex_chat_to_responses_transform(
         })
 }
 
+fn should_return_chat_transform_as_sse(requested_streaming: bool, _upstream_is_sse: bool) -> bool {
+    // Upstream media type controls parsing, not the response contract requested by Codex.
+    requested_streaming
+}
+
 /// Response-transform handler for the Codex (Responses) ↔ Anthropic Messages gateway.
 ///
 /// Parallel to `handle_codex_chat_to_responses_transform`: the upstream speaks
@@ -1588,7 +1651,7 @@ async fn handle_codex_anthropic_to_responses_transform(
     // Preserve live streaming when the gateway marks SSE correctly or omits an
     // explicit JSON media type. Explicit JSON is buffered below so 2xx error
     // envelopes and gateways that ignore stream:true can be converted faithfully.
-    if response.is_sse() || (is_stream && !response.is_json()) {
+    if should_return_anthropic_transform_as_sse(is_stream, response.is_sse(), response.is_json()) {
         let stream = response.bytes_stream();
         let sse_stream =
             create_responses_sse_stream_from_anthropic_with_context(stream, codex_tool_context);
@@ -1725,6 +1788,14 @@ async fn handle_codex_anthropic_to_responses_transform(
             log::error!("[Codex] Failed to build Responses response: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
         })
+}
+
+fn should_return_anthropic_transform_as_sse(
+    requested_streaming: bool,
+    upstream_is_sse: bool,
+    upstream_is_json: bool,
+) -> bool {
+    requested_streaming && (upstream_is_sse || !upstream_is_json)
 }
 
 fn build_codex_anthropic_sse_response(
@@ -2512,7 +2583,10 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
                 .is_some_and(|o| !o.is_empty());
             let (payload, is_full_message) = if delta_nonempty {
                 (choice.get("delta").unwrap(), false)
-            } else if let Some(message) = choice.get("message") {
+            } else if let Some(message) = choice
+                .get("message")
+                .filter(|message| message.as_object().is_some_and(|object| !object.is_empty()))
+            {
                 (message, true)
             } else if let Some(delta) = choice.get("delta") {
                 // 空 delta 且无 message：正常的纯 finish_reason 收尾块
@@ -2816,6 +2890,7 @@ mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
         codex_proxy_error_json, responses_sse_to_response_value,
+        should_return_anthropic_transform_as_sse, should_return_chat_transform_as_sse,
         should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
@@ -2837,6 +2912,16 @@ mod tests {
         assert!(!body_looks_like_sse("<html><body>blocked</body></html>"));
         assert!(!body_looks_like_sse("Bad Gateway"));
         assert!(!body_looks_like_sse(""));
+    }
+
+    #[test]
+    fn upstream_sse_does_not_override_non_streaming_codex_contract() {
+        assert!(!should_return_chat_transform_as_sse(false, true));
+        assert!(!should_return_anthropic_transform_as_sse(
+            false, true, false,
+        ));
+        assert!(should_return_chat_transform_as_sse(true, true));
+        assert!(should_return_anthropic_transform_as_sse(true, true, false,));
     }
 
     #[test]
@@ -3210,6 +3295,16 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"
 
         let response = chat_sse_to_response_value(sse).unwrap();
         assert_eq!(response["choices"][0]["message"]["content"], "hi there");
+    }
+
+    #[test]
+    fn chat_sse_to_response_value_empty_terminal_message_does_not_wipe_real_content() {
+        let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"kept\"},\"finish_reason\":null}]}\n\n\
+data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"message\":{},\"finish_reason\":\"stop\"}]}\n\n";
+
+        let response = chat_sse_to_response_value(sse).unwrap();
+        assert_eq!(response["choices"][0]["message"]["content"], "kept");
+        assert_eq!(response["choices"][0]["finish_reason"], "stop");
     }
 
     #[test]

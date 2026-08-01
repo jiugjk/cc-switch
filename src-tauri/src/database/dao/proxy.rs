@@ -829,6 +829,41 @@ impl Database {
         }
     }
 
+    /// Restore an exact live-backup row captured before a larger transaction.
+    ///
+    /// Unlike `save_live_backup`, this preserves the original `backed_up_at`
+    /// value. `None` restores the row's absence. Provider updates use this only
+    /// as compensation after a later live/provider write fails.
+    pub async fn restore_live_backup_snapshot(
+        &self,
+        app_type: &str,
+        snapshot: Option<&LiveBackup>,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        match snapshot {
+            Some(backup) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO proxy_live_backup (app_type, original_config, backed_up_at)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![
+                        app_type,
+                        &backup.original_config,
+                        &backup.backed_up_at,
+                    ],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM proxy_live_backup WHERE app_type = ?1",
+                    rusqlite::params![app_type],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// 删除 Live 配置备份
     pub async fn delete_live_backup(&self, app_type: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);

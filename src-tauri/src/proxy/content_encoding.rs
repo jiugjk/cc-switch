@@ -7,6 +7,11 @@
 use axum::http::header::HeaderMap;
 use std::io::Read;
 
+/// 非流式响应在代理进程内允许的最大解压后体积。
+///
+/// 调用方若只需要更小的诊断体，应使用 [`decompress_body_with_limit`] 传入更低上限。
+pub(crate) const MAX_DECOMPRESSED_BODY_BYTES: usize = 64 * 1024 * 1024;
+
 /// 把 content-encoding 值拆成有序 coding 列表（去掉 identity 与空值）。
 ///
 /// HTTP 允许堆叠编码（如 `gzip, zstd`），各 coding 以逗号分隔；亦允许重复
@@ -28,40 +33,85 @@ fn is_single_supported(coding: &str) -> bool {
 }
 
 /// 解压单个 content-coding。未知编码返回 `Ok(None)`。
-fn decompress_single(coding: &str, body: &[u8]) -> Result<Option<Vec<u8>>, std::io::Error> {
+#[derive(Debug)]
+enum LimitedReadError {
+    Read(std::io::Error),
+    LimitExceeded { max_output_bytes: usize },
+}
+
+impl From<LimitedReadError> for std::io::Error {
+    fn from(error: LimitedReadError) -> Self {
+        match error {
+            LimitedReadError::Read(error) => error,
+            LimitedReadError::LimitExceeded { max_output_bytes } => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("decompressed body exceeds the {max_output_bytes}-byte safety limit"),
+            ),
+        }
+    }
+}
+
+fn read_to_end_limited(
+    reader: impl Read,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, LimitedReadError> {
+    let read_limit = u64::try_from(max_output_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut limited = reader.take(read_limit);
+    let mut decompressed = Vec::new();
+    limited
+        .read_to_end(&mut decompressed)
+        .map_err(LimitedReadError::Read)?;
+    if decompressed.len() > max_output_bytes {
+        return Err(LimitedReadError::LimitExceeded { max_output_bytes });
+    }
+    Ok(decompressed)
+}
+
+fn decompress_single(
+    coding: &str,
+    body: &[u8],
+    max_output_bytes: usize,
+) -> Result<Option<Vec<u8>>, std::io::Error> {
     match coding {
         "gzip" | "x-gzip" => {
-            let mut decoder = flate2::read::GzDecoder::new(body);
-            let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed)?;
-            Ok(Some(decompressed))
+            let decoder = flate2::read::GzDecoder::new(body);
+            Ok(Some(
+                read_to_end_limited(decoder, max_output_bytes).map_err(std::io::Error::from)?,
+            ))
         }
         "deflate" => {
             // RFC 9110: deflate 指 zlib 包裹格式；但部分上游 / 客户端发 raw deflate 流。
             // 先按规范尝试 zlib，失败再回退 raw —— 否则合规来源必然解压失败，
             // 原始压缩字节会被 fail-open 透传给 JSON 解析（#2234 形态 C 之一）。
-            let mut decompressed = Vec::new();
-            let mut zlib = flate2::read::ZlibDecoder::new(body);
-            match zlib.read_to_end(&mut decompressed) {
-                Ok(_) => Ok(Some(decompressed)),
-                Err(zlib_err) => {
+            let zlib = flate2::read::ZlibDecoder::new(body);
+            match read_to_end_limited(zlib, max_output_bytes) {
+                Ok(decompressed) => Ok(Some(decompressed)),
+                Err(LimitedReadError::LimitExceeded { max_output_bytes }) => {
+                    Err(LimitedReadError::LimitExceeded { max_output_bytes }.into())
+                }
+                Err(LimitedReadError::Read(zlib_err)) => {
                     log::debug!("deflate 按 zlib 解压失败（{zlib_err}），回退 raw deflate");
-                    let mut decompressed = Vec::new();
-                    let mut raw = flate2::read::DeflateDecoder::new(body);
-                    raw.read_to_end(&mut decompressed)?;
-                    Ok(Some(decompressed))
+                    let raw = flate2::read::DeflateDecoder::new(body);
+                    Ok(Some(
+                        read_to_end_limited(raw, max_output_bytes).map_err(std::io::Error::from)?,
+                    ))
                 }
             }
         }
         "br" => {
-            let mut decompressed = Vec::new();
-            brotli::BrotliDecompress(&mut std::io::Cursor::new(body), &mut decompressed)?;
-            Ok(Some(decompressed))
+            let decoder = brotli::Decompressor::new(body, 4096);
+            Ok(Some(
+                read_to_end_limited(decoder, max_output_bytes).map_err(std::io::Error::from)?,
+            ))
         }
         "zstd" | "zst" => {
             // Codex 登录态对请求体启用 zstd（Compression::Zstd）；上游也可能 zstd 压缩响应。
-            let decompressed = zstd::stream::decode_all(std::io::Cursor::new(body))?;
-            Ok(Some(decompressed))
+            let decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(body))?;
+            Ok(Some(
+                read_to_end_limited(decoder, max_output_bytes).map_err(std::io::Error::from)?,
+            ))
         }
         _ => Ok(None),
     }
@@ -75,6 +125,18 @@ fn decompress_single(coding: &str, body: &[u8]) -> Result<Option<Vec<u8>>, std::
 pub(crate) fn decompress_body(
     content_encoding: &str,
     body: &[u8],
+) -> Result<Option<Vec<u8>>, std::io::Error> {
+    decompress_body_with_limit(content_encoding, body, MAX_DECOMPRESSED_BODY_BYTES)
+}
+
+/// 与 [`decompress_body`] 相同，但由调用方指定每一层解码允许产生的最大字节数。
+///
+/// 堆叠编码会在每个中间层应用同一上限，避免中间表示先无限膨胀、最终层再缩小的
+/// 输入绕过内存保护。
+pub(crate) fn decompress_body_with_limit(
+    content_encoding: &str,
+    body: &[u8],
+    max_output_bytes: usize,
 ) -> Result<Option<Vec<u8>>, std::io::Error> {
     let codings = split_codings(content_encoding);
     if codings.is_empty() {
@@ -90,7 +152,7 @@ pub(crate) fn decompress_body(
     let mut data: Option<Vec<u8>> = None;
     for coding in codings.iter().rev() {
         let input = data.as_deref().unwrap_or(body);
-        match decompress_single(coding, input)? {
+        match decompress_single(coding, input, max_output_bytes)? {
             Some(decompressed) => data = Some(decompressed),
             // 上面 is_single_supported 已校验，理论不会发生；防御性兜底。
             None => return Ok(None),
@@ -193,6 +255,31 @@ mod tests {
         // 头被剥掉，下游诊断会把压缩字节误报成明文
         let result = decompress_body("snappy", b"\x00\x01\x02\x03").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn decompress_body_rejects_output_above_limit() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &vec![b'x'; 1025]).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let error = decompress_body_with_limit("gzip", &compressed, 1024)
+            .expect_err("expanded body must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("1024-byte safety limit"));
+    }
+
+    #[test]
+    fn deflate_limit_rejection_does_not_fall_back_to_raw_decoder() {
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &vec![b'x'; 1025]).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let error = decompress_body_with_limit("deflate", &compressed, 1024)
+            .expect_err("expanded zlib body must be rejected without a raw-deflate fallback");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("1024-byte safety limit"));
     }
 
     #[test]

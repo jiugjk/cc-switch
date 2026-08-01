@@ -57,6 +57,9 @@ pub fn import_mcp_from_deeplink(
 
     // Parse apps into McpApps struct
     let target_apps = parse_mcp_apps(apps_str)?;
+    // DeepLinkImportRequest documents omitted `enabled` as false. Only an explicit true may
+    // write executable MCP configuration into the selected applications.
+    let enabled = request.enabled.unwrap_or(false);
 
     // Extract config
     let config_b64 = request
@@ -98,10 +101,11 @@ pub fn import_mcp_from_deeplink(
     for (id, server_spec) in mcp_servers.iter() {
         // Check if server already exists
         let server = if let Some(existing) = existing_servers.get(id) {
-            // Server exists - merge apps only, keep other fields unchanged
-            log::info!("MCP server '{id}' already exists, merging apps only");
+            // Server exists - update only the apps named by this link, preserving every
+            // unspecified app and the existing server configuration.
+            log::info!("MCP server '{id}' already exists, updating selected apps only");
 
-            let merged_apps = merge_mcp_apps(&existing.apps, &target_apps);
+            let merged_apps = apply_mcp_apps(&existing.apps, &target_apps, enabled);
 
             McpServer {
                 id: existing.id.clone(),
@@ -120,7 +124,11 @@ pub fn import_mcp_from_deeplink(
                 id: id.clone(),
                 name: id.clone(),
                 server: server_spec.clone(),
-                apps: target_apps.clone(),
+                apps: if enabled {
+                    target_apps.clone()
+                } else {
+                    McpApps::default()
+                },
                 description: None,
                 homepage: None,
                 docs: None,
@@ -190,10 +198,10 @@ pub(crate) fn parse_mcp_apps(apps_str: &str) -> Result<McpApps, AppError> {
     Ok(apps)
 }
 
-fn merge_mcp_apps(existing: &McpApps, target: &McpApps) -> McpApps {
+fn apply_mcp_apps(existing: &McpApps, target: &McpApps, enabled: bool) -> McpApps {
     let mut merged = existing.clone();
     for app in target.enabled_apps() {
-        merged.set_enabled_for(&app, true);
+        merged.set_enabled_for(&app, enabled);
     }
     merged
 }
@@ -201,6 +209,50 @@ fn merge_mcp_apps(existing: &McpApps, target: &McpApps) -> McpApps {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::prelude::*;
+    use serial_test::serial;
+    use std::sync::Arc;
+
+    fn import_request(id: &str, apps: &str, enabled: Option<bool>) -> DeepLinkImportRequest {
+        let config = BASE64_STANDARD.encode(
+            serde_json::json!({
+                "mcpServers": {
+                    (id): { "command": "echo", "args": [id] }
+                }
+            })
+            .to_string(),
+        );
+        DeepLinkImportRequest {
+            resource: "mcp".to_string(),
+            apps: Some(apps.to_string()),
+            config: Some(config),
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    struct TestHome {
+        original: Option<std::ffi::OsString>,
+        dir: tempfile::TempDir,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().expect("temp home");
+            let original = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            Self { original, dir }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
 
     #[test]
     fn enabled_apps_merge_covers_every_supported_mcp_client() {
@@ -216,7 +268,7 @@ mod tests {
             hermes: true,
             ..McpApps::default()
         };
-        let merged = merge_mcp_apps(&existing, &target);
+        let merged = apply_mcp_apps(&existing, &target, true);
 
         assert!(merged.claude);
         assert!(merged.codex);
@@ -224,5 +276,95 @@ mod tests {
         assert!(merged.grokbuild);
         assert!(merged.opencode);
         assert!(merged.hermes);
+    }
+
+    #[test]
+    fn disabled_import_only_disables_apps_named_by_the_link() {
+        let existing = McpApps {
+            claude: true,
+            codex: true,
+            gemini: true,
+            ..McpApps::default()
+        };
+        let target = McpApps {
+            codex: true,
+            gemini: true,
+            ..McpApps::default()
+        };
+
+        let merged = apply_mcp_apps(&existing, &target, false);
+        assert!(merged.claude, "unspecified apps must be preserved");
+        assert!(!merged.codex);
+        assert!(!merged.gemini);
+    }
+
+    #[test]
+    fn enabled_defaults_to_false() {
+        let omitted = DeepLinkImportRequest::default();
+        let explicit_false = DeepLinkImportRequest {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let explicit_true = DeepLinkImportRequest {
+            enabled: Some(true),
+            ..Default::default()
+        };
+
+        assert!(!omitted.enabled.unwrap_or(false));
+        assert!(!explicit_false.enabled.unwrap_or(false));
+        assert!(explicit_true.enabled.unwrap_or(false));
+    }
+
+    #[test]
+    #[serial]
+    fn import_enabled_semantics_persist_disabled_and_only_change_selected_apps() {
+        let home = TestHome::new();
+        std::fs::create_dir_all(home.dir.path().join(".codex")).unwrap();
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+
+        import_mcp_from_deeplink(&state, import_request("omitted", "codex", None))
+            .expect("omitted enabled import");
+        import_mcp_from_deeplink(
+            &state,
+            import_request("explicit-false", "codex", Some(false)),
+        )
+        .expect("explicit false import");
+
+        let servers = db.get_all_mcp_servers().unwrap();
+        assert!(!servers["omitted"].apps.codex);
+        assert!(!servers["explicit-false"].apps.codex);
+        let codex_config = home.dir.path().join(".codex").join("config.toml");
+        assert!(
+            !codex_config.exists(),
+            "disabled imports must not project executable live configuration"
+        );
+
+        import_mcp_from_deeplink(
+            &state,
+            import_request("selected", "claude,codex", Some(true)),
+        )
+        .expect("explicit true import");
+        let servers = db.get_all_mcp_servers().unwrap();
+        assert!(servers["selected"].apps.claude);
+        assert!(servers["selected"].apps.codex);
+        assert!(
+            std::fs::read_to_string(&codex_config)
+                .unwrap()
+                .contains("selected"),
+            "explicit true must project to selected apps"
+        );
+
+        import_mcp_from_deeplink(&state, import_request("selected", "codex", Some(false)))
+            .expect("disable selected app");
+        let servers = db.get_all_mcp_servers().unwrap();
+        assert!(
+            servers["selected"].apps.claude,
+            "apps omitted by the link must retain their previous state"
+        );
+        assert!(!servers["selected"].apps.codex);
+        assert!(!std::fs::read_to_string(&codex_config)
+            .unwrap()
+            .contains("selected"));
     }
 }

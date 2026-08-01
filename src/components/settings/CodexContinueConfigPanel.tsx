@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -25,47 +25,107 @@ export function CodexContinueConfigPanel() {
     DEFAULT_CODEX_CONTINUE_CONFIG,
   );
   const [isLoading, setIsLoading] = useState(true);
+  const configRef = useRef(DEFAULT_CODEX_CONTINUE_CONFIG);
+  const committedConfigRef = useRef(DEFAULT_CODEX_CONTINUE_CONFIG);
+  const latestIntentRef = useRef(0);
+  const draftRevisionRef = useRef(0);
+  const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
+    isMountedRef.current = true;
     settingsApi
       .getCodexContinueConfig()
       .then((loaded) => {
+        configRef.current = loaded;
+        committedConfigRef.current = loaded;
         setConfig(loaded);
         setDraft(loaded);
       })
       .catch((e) => console.error("Failed to load CodexCont config:", e))
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (isMountedRef.current) setIsLoading(false);
+      });
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
 
-  const handleChange = async (updates: Partial<CodexContinueConfig>) => {
-    const newConfig = { ...config, ...updates };
+  const handleChange = (
+    updates: Partial<CodexContinueConfig>,
+    preserveAdvancedDraft = false,
+  ) => {
+    // Tauri commands may complete out of order. Build every intent from the
+    // latest optimistic value, then serialize the complete snapshots so the
+    // backend always finishes in the same order as the user's actions.
+    const newConfig = { ...configRef.current, ...updates };
+    const intent = ++latestIntentRef.current;
+    const draftRevision = ++draftRevisionRef.current;
+    configRef.current = newConfig;
     setConfig(newConfig);
-    setDraft(newConfig);
-    try {
-      await settingsApi.setCodexContinueConfig(newConfig);
-      toast.success(
-        newConfig.enabled
-          ? t("settings.advanced.codexContinue.enabledToast", {
-              defaultValue: "CodexCont 自动续写已启用",
-            })
-          : t("settings.advanced.codexContinue.disabledToast", {
-              defaultValue: "CodexCont 自动续写已关闭",
-            }),
-        { closeButton: true },
-      );
-    } catch (e) {
-      console.error("Failed to save CodexCont config:", e);
-      toast.error(String(e));
-      setConfig(config);
-      setDraft(config);
-    }
+    setDraft((previousDraft) =>
+      preserveAdvancedDraft
+        ? { ...previousDraft, enabled: newConfig.enabled }
+        : newConfig,
+    );
+
+    const write = writeQueueRef.current.then(async () => {
+      try {
+        await settingsApi.setCodexContinueConfig(newConfig);
+        committedConfigRef.current = newConfig;
+        if (isMountedRef.current && intent === latestIntentRef.current) {
+          toast.success(
+            newConfig.enabled
+              ? t("settings.advanced.codexContinue.enabledToast", {
+                  defaultValue: "CodexCont 自动续写已启用",
+                })
+              : t("settings.advanced.codexContinue.disabledToast", {
+                  defaultValue: "CodexCont 自动续写已关闭",
+                }),
+            { closeButton: true },
+          );
+        }
+      } catch (error) {
+        console.error("Failed to save CodexCont config:", error);
+        if (!isMountedRef.current || intent !== latestIntentRef.current) return;
+
+        const committed = committedConfigRef.current;
+        configRef.current = committed;
+        setConfig(committed);
+        setDraft((previousDraft) => {
+          // A toggle never owns the unsaved advanced draft. Likewise, if the
+          // user edited fields while an advanced save was in flight, preserve
+          // that newer draft and roll back only the committed enabled state.
+          if (
+            preserveAdvancedDraft ||
+            draftRevisionRef.current !== draftRevision
+          ) {
+            return { ...previousDraft, enabled: committed.enabled };
+          }
+          return committed;
+        });
+        toast.error(String(error));
+      }
+    });
+    // Each task handles its own failure; keep a permanently usable queue even
+    // when an individual persistence call rejects.
+    writeQueueRef.current = write;
+    return write;
   };
 
   const handleSaveAdvanced = async () => {
-    const maxContinuations = Math.max(0, Math.floor(draft.maxContinuations));
+    const maxContinuations = Math.min(
+      32,
+      Math.max(0, Math.floor(draft.maxContinuations)),
+    );
     const step = Math.max(3, Math.floor(draft.step));
     const marker = draft.marker.trim() || DEFAULT_CODEX_CONTINUE_CONFIG.marker;
     await handleChange({ maxContinuations, step, marker });
+  };
+
+  const updateDraft = (updates: Partial<CodexContinueConfig>) => {
+    draftRevisionRef.current += 1;
+    setDraft((previousDraft) => ({ ...previousDraft, ...updates }));
   };
 
   if (isLoading) return null;
@@ -88,7 +148,9 @@ export function CodexContinueConfigPanel() {
         </div>
         <Switch
           checked={config.enabled}
-          onCheckedChange={(checked) => handleChange({ enabled: checked })}
+          onCheckedChange={(checked) =>
+            handleChange({ enabled: checked }, true)
+          }
         />
       </div>
 
@@ -106,10 +168,7 @@ export function CodexContinueConfigPanel() {
             max={32}
             value={draft.maxContinuations}
             onChange={(event) =>
-              setDraft((prev) => ({
-                ...prev,
-                maxContinuations: Number(event.target.value),
-              }))
+              updateDraft({ maxContinuations: Number(event.target.value) })
             }
           />
         </div>
@@ -125,10 +184,7 @@ export function CodexContinueConfigPanel() {
             min={3}
             value={draft.step}
             onChange={(event) =>
-              setDraft((prev) => ({
-                ...prev,
-                step: Number(event.target.value),
-              }))
+              updateDraft({ step: Number(event.target.value) })
             }
           />
         </div>
@@ -143,9 +199,7 @@ export function CodexContinueConfigPanel() {
         <Textarea
           id="codex-continue-marker"
           value={draft.marker}
-          onChange={(event) =>
-            setDraft((prev) => ({ ...prev, marker: event.target.value }))
-          }
+          onChange={(event) => updateDraft({ marker: event.target.value })}
           rows={3}
         />
         <p className="text-xs text-muted-foreground">

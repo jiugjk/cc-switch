@@ -326,6 +326,18 @@ pub fn codex_specs_equivalent(db_spec: &Value, live_spec: &Value) -> bool {
     }
 }
 
+/// Merge a live Codex edit back into the shared DB spec without deleting fields that Codex's
+/// TOML projection cannot represent. Representable fields are replaced as a set, so deleting a
+/// normal live field (for example `cwd` or `timeout`) still propagates to the DB.
+pub(crate) fn merge_codex_live_spec(db_spec: &Value, live_spec: &Value) -> Value {
+    super::merge_lossy_live_spec(
+        db_spec,
+        live_spec,
+        canonicalize_codex_spec_for_compare(db_spec),
+        &["http_headers"],
+    )
+}
+
 /// 将 config.json 中 Codex 的 enabled==true 项以 TOML 形式写入 ~/.codex/config.toml
 ///
 /// 格式策略：
@@ -514,12 +526,14 @@ pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
     let content =
         std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
 
-    // 尝试解析现有配置，如果失败则直接返回（无法删除不存在的内容）
+    // 解析失败必须向上层报告：把未执行的删除当作成功会让 DB/界面显示已禁用，
+    // 但可执行 MCP 命令仍留在 live 配置中。
     let mut doc = match content.parse::<toml_edit::DocumentMut>() {
         Ok(doc) => doc,
         Err(e) => {
-            log::warn!("解析 Codex config.toml 失败: {e}，跳过删除操作");
-            return Ok(());
+            return Err(AppError::McpValidation(format!(
+                "解析 Codex config.toml 失败，无法安全删除 MCP 服务器 '{id}': {e}"
+            )));
         }
     };
 
@@ -854,6 +868,22 @@ command = "echo"
 
     #[test]
     #[serial]
+    fn remove_server_reports_invalid_live_toml_instead_of_succeeding() {
+        let home = TestHome::new();
+        let invalid = "[mcp_servers.demo\ncommand = \"echo\"";
+        home.write_codex_config(invalid);
+
+        let error = remove_server_from_codex("demo")
+            .expect_err("an unperformed removal must not report success");
+        assert!(matches!(error, AppError::McpValidation(_)));
+        assert_eq!(
+            std::fs::read_to_string(home.dir.path().join(".codex/config.toml")).unwrap(),
+            invalid
+        );
+    }
+
+    #[test]
+    #[serial]
     fn collect_live_codex_server_specs_handles_missing_file_and_invalid_entries() {
         let home = TestHome::new();
 
@@ -917,6 +947,69 @@ command = "echo"
             !codex_specs_equivalent(&db_spec, &live_spec),
             "a changed cwd is a real user edit"
         );
+    }
+
+    #[test]
+    fn merge_codex_live_spec_preserves_unprojectable_shared_extensions() {
+        let db_spec = json!({
+            "type": "stdio",
+            "command": "old-command",
+            "cwd": "/old",
+            "shared_extension": { "nested": 42 },
+            "mixed_extension": ["kept", { "secret": "value" }]
+        });
+        let live_spec = json!({
+            "type": "stdio",
+            "command": "new-command"
+        });
+
+        let merged = merge_codex_live_spec(&db_spec, &live_spec);
+        assert_eq!(merged["command"], "new-command");
+        assert!(
+            merged.get("cwd").is_none(),
+            "representable deletion must propagate"
+        );
+        assert_eq!(merged["shared_extension"], db_spec["shared_extension"]);
+        assert_eq!(merged["mixed_extension"], db_spec["mixed_extension"]);
+    }
+
+    #[test]
+    fn merge_codex_live_spec_preserves_nested_unprojectable_values_and_drops_alias() {
+        let db_spec = json!({
+            "type": "http",
+            "url": "https://old.example.test",
+            "headers": {
+                "Authorization": "Bearer old",
+                "X-Delete": "old",
+                "nested_extension": { "keep": 42 },
+                "numeric_extension": 7
+            },
+            "http_headers": { "Stale": "legacy alias" },
+            "mixed_object": {
+                "visible": "old",
+                "nested": { "keep": true }
+            }
+        });
+        let live_spec = json!({
+            "type": "http",
+            "url": "https://new.example.test",
+            "headers": {
+                "Authorization": "Bearer new",
+                "X-New": "new"
+            },
+            "mixed_object": { "visible": "new" }
+        });
+
+        let merged = merge_codex_live_spec(&db_spec, &live_spec);
+        assert_eq!(merged["url"], "https://new.example.test");
+        assert_eq!(merged["headers"]["Authorization"], "Bearer new");
+        assert_eq!(merged["headers"]["X-New"], "new");
+        assert!(merged["headers"].get("X-Delete").is_none());
+        assert_eq!(merged["headers"]["nested_extension"]["keep"], 42);
+        assert_eq!(merged["headers"]["numeric_extension"], 7);
+        assert_eq!(merged["mixed_object"]["visible"], "new");
+        assert_eq!(merged["mixed_object"]["nested"]["keep"], true);
+        assert!(merged.get("http_headers").is_none());
     }
 
     #[test]

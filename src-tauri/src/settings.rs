@@ -696,28 +696,35 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
 
     let json = serde_json::to_string_pretty(&normalized)
         .map_err(|e| AppError::JsonSerialize { source: e })?;
+
+    // Write the complete payload to a same-directory temporary file, secure it,
+    // then replace the target. In particular, never seed an empty target file:
+    // a crash between create and rename would otherwise reset all settings on
+    // the next launch.
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("无效的设置路径".to_string()))?;
+    let mut temp = tempfile::Builder::new()
+        .prefix("settings.json.tmp.")
+        .tempfile_in(parent)
+        .map_err(|e| AppError::io(parent, e))?;
+    temp.write_all(json.as_bytes())
+        .map_err(|e| AppError::io(temp.path(), e))?;
+    temp.flush().map_err(|e| AppError::io(temp.path(), e))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| AppError::io(temp.path(), e))?;
+
     #[cfg(unix)]
     {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| AppError::io(&path, e))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| AppError::io(&path, e))?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o600))
+            .map_err(|e| AppError::io(temp.path(), e))?;
     }
 
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
-    }
-
+    temp.persist(&path)
+        .map_err(|e| AppError::io(&path, e.error))?;
     Ok(())
 }
 
@@ -767,32 +774,67 @@ pub fn get_settings_for_frontend() -> AppSettings {
     settings
 }
 
-pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
-    new_settings.normalize_paths();
-    save_settings_file(&new_settings)?;
-
+/// Serialize a read-modify-write settings transaction under the same lock used
+/// by background mutations.
+pub(crate) fn update_settings_with<F, T>(update: F) -> Result<T, AppError>
+where
+    F: FnOnce(&AppSettings) -> (AppSettings, T),
+{
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
     });
-    *guard = new_settings;
-    Ok(())
+    let (mut next, value) = update(&guard);
+    next.normalize_paths();
+    save_settings_file(&next)?;
+    *guard = next;
+    Ok(value)
+}
+
+pub fn update_settings(new_settings: AppSettings) -> Result<(), AppError> {
+    update_settings_with(|_| (new_settings, ())).map(|_| ())
+}
+
+/// Compare-and-swap rollback for the Codex official-history unification flag.
+///
+/// A live-config rewrite happens after the frontend settings transaction has
+/// committed. Background settings mutations may commit while that rewrite is
+/// running, so rolling back the whole `AppSettings` snapshot would erase those
+/// newer fields. Instead, preserve the latest settings object and revert only
+/// this flag when it still has the value written by the failed save.
+///
+/// Returning `false` means a newer settings transaction changed this flag and
+/// its value must not be overwritten.
+pub(crate) fn rollback_unify_codex_session_history_if_matches(
+    attempted_value: bool,
+    previous_value: bool,
+) -> Result<bool, AppError> {
+    let mut guard = settings_store().write().unwrap_or_else(|e| {
+        log::warn!("设置锁已毒化，使用恢复值: {e}");
+        e.into_inner()
+    });
+    if guard.unify_codex_session_history != attempted_value {
+        return Ok(false);
+    }
+
+    let mut next = guard.clone();
+    next.unify_codex_session_history = previous_value;
+    next.normalize_paths();
+    save_settings_file(&next)?;
+    *guard = next;
+    Ok(true)
 }
 
 fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut AppSettings),
 {
-    let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
-        e.into_inner()
-    });
-    let mut next = guard.clone();
-    mutator(&mut next);
-    next.normalize_paths();
-    save_settings_file(&next)?;
-    *guard = next;
-    Ok(())
+    update_settings_with(|current| {
+        let mut next = current.clone();
+        mutator(&mut next);
+        (next, ())
+    })
+    .map(|_| ())
 }
 
 pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {
@@ -890,11 +932,11 @@ pub fn clear_codex_unify_migrate_existing() -> Result<(), AppError> {
 /// 从文件重新加载设置到内存缓存
 /// 用于导入配置等场景，确保内存缓存与文件同步
 pub fn reload_settings() -> Result<(), AppError> {
-    let fresh_settings = AppSettings::load_from_file();
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
     });
+    let fresh_settings = AppSettings::load_from_file();
     *guard = fresh_settings;
     Ok(())
 }
@@ -1236,6 +1278,10 @@ pub(crate) mod test_support {
                 original_test_home,
             }
         }
+
+        pub(crate) fn home(&self) -> &std::path::Path {
+            self.dir.path()
+        }
     }
 
     impl Drop for AmbientSettings {
@@ -1264,6 +1310,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+    use serial_test::serial;
 
     #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {
@@ -1315,5 +1362,60 @@ mod tests {
 
         let parsed: AppSettings = serde_json::from_str(&json).expect("parse settings");
         assert!(!parsed.codex_default_requires_openai_auth);
+    }
+
+    #[test]
+    #[serial]
+    fn whole_save_and_background_mutation_share_one_serial_transaction() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let ambient = test_support::AmbientSettings::pin("{}");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (background_done_tx, background_done_rx) = mpsc::channel();
+
+        let whole_save = std::thread::spawn(move || {
+            update_settings_with(|current| {
+                entered_tx.send(()).expect("signal whole-save lock");
+                release_rx.recv().expect("release whole-save lock");
+                let mut next = current.clone();
+                next.language = Some("ja".to_string());
+                (next, ())
+            })
+            .expect("whole save transaction");
+        });
+
+        entered_rx.recv().expect("whole save entered transaction");
+        let background = std::thread::spawn(move || {
+            set_current_provider(&AppType::Codex, Some("background-provider"))
+                .expect("background mutation");
+            background_done_tx.send(()).expect("signal background done");
+        });
+
+        assert!(
+            background_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "background mutation must wait for the whole-save transaction lock"
+        );
+        release_tx.send(()).expect("release whole save");
+        whole_save.join().expect("join whole save");
+        background.join().expect("join background mutation");
+
+        let cached = get_settings();
+        assert_eq!(cached.language.as_deref(), Some("ja"));
+        assert_eq!(
+            cached.current_provider_codex.as_deref(),
+            Some("background-provider")
+        );
+
+        let disk: AppSettings = serde_json::from_str(
+            &fs::read_to_string(ambient.home().join(".cc-switch/settings.json"))
+                .expect("read settings file"),
+        )
+        .expect("parse settings file");
+        assert_eq!(disk.language, cached.language);
+        assert_eq!(disk.current_provider_codex, cached.current_provider_codex);
     }
 }

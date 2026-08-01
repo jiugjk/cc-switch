@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { DeepLinkImportRequest, deeplinkApi } from "@/lib/api/deeplink";
 import { parseDeepLinkConfigPreview } from "@/utils/deepLinkConfigPreview";
@@ -39,6 +39,9 @@ export function DeepLinkImportDialog() {
   const [request, setRequest] = useState<DeepLinkImportRequest | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  const pendingRequests = useRef<DeepLinkImportRequest[]>([]);
+  const hasActiveRequest = useRef(false);
+  const isMounted = useRef(true);
 
   // 容错判断：MCP 导入结果可能缺少 type 字段
   const isMcpImportResult = (
@@ -59,31 +62,57 @@ export function DeepLinkImportDialog() {
   };
 
   useEffect(() => {
-    // Listen for deep link import events
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+      pendingRequests.current = [];
+    };
+  }, []);
+
+  const showNextRequest = useCallback(async () => {
+    if (hasActiveRequest.current) return;
+    const nextRequest = pendingRequests.current.shift();
+    if (!nextRequest) return;
+
+    // Reserve the active slot before the first await so two events in the same tick cannot both
+    // start merging and race to overwrite the dialog.
+    hasActiveRequest.current = true;
+    let preparedRequest = nextRequest;
+    if (nextRequest.config || nextRequest.configUrl) {
+      try {
+        preparedRequest = await deeplinkApi.mergeDeeplinkConfig(nextRequest);
+      } catch (error) {
+        console.error("Failed to merge config:", error);
+        toast.error(t("deeplink.configMergeError"), {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    if (!isMounted.current) return;
+    setRequest(preparedRequest);
+    setIsOpen(true);
+  }, [t]);
+
+  const finishCurrentRequest = useCallback(() => {
+    setIsOpen(false);
+    setRequest(null);
+    hasActiveRequest.current = false;
+    // Let React commit the close before opening the next item; this also gives assistive
+    // technology a deterministic dialog boundary between two queued links.
+    queueMicrotask(() => {
+      if (isMounted.current) void showNextRequest();
+    });
+  }, [showNextRequest]);
+
+  useEffect(() => {
+    // Listen for deep link import events. Arrival order is preserved by the explicit queue even
+    // when an earlier event requires a slower asynchronous config merge.
     const unlistenImport = listen<DeepLinkImportRequest>(
       "deeplink-import",
-      async (event) => {
-        // If config is present, merge it to get the complete configuration
-        if (event.payload.config || event.payload.configUrl) {
-          try {
-            const mergedRequest = await deeplinkApi.mergeDeeplinkConfig(
-              event.payload,
-            );
-            setRequest(mergedRequest);
-          } catch (error) {
-            console.error("Failed to merge config:", error);
-            toast.error(t("deeplink.configMergeError"), {
-              description:
-                error instanceof Error ? error.message : String(error),
-            });
-            // Fall back to original request
-            setRequest(event.payload);
-          }
-        } else {
-          setRequest(event.payload);
-        }
-
-        setIsOpen(true);
+      (event) => {
+        pendingRequests.current.push(event.payload);
+        void showNextRequest();
       },
     );
 
@@ -99,7 +128,7 @@ export function DeepLinkImportDialog() {
       unlistenImport.then((fn) => fn());
       unlistenError.then((fn) => fn());
     };
-  }, [t]);
+  }, [showNextRequest, t]);
 
   const handleImport = async () => {
     if (!request) return;
@@ -200,8 +229,8 @@ export function DeepLinkImportDialog() {
         });
       }
 
-      // Close dialog after all refreshes complete
-      setIsOpen(false);
+      // Consume this item only after all refreshes complete, then show the next queued link.
+      finishCurrentRequest();
     } catch (error) {
       console.error("Failed to import from deep link:", error);
       toast.error(t("deeplink.importError"), {
@@ -213,7 +242,15 @@ export function DeepLinkImportDialog() {
   };
 
   const handleCancel = () => {
-    setIsOpen(false);
+    if (!isImporting) finishCurrentRequest();
+  };
+
+  const handleOpenChange = (open: boolean) => {
+    if (open) {
+      setIsOpen(true);
+    } else if (!isImporting) {
+      finishCurrentRequest();
+    }
   };
 
   const maskedApiKey = request?.apiKey
@@ -286,7 +323,7 @@ export function DeepLinkImportDialog() {
   };
 
   return (
-    <Dialog open={isOpen && !!request} onOpenChange={setIsOpen}>
+    <Dialog open={isOpen && !!request} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[500px]" zIndex="top">
         {request && (
           <>

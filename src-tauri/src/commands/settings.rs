@@ -7,6 +7,12 @@ use tauri::AppHandle;
 pub(crate) const UPDATER_DISABLED_MESSAGE: &str =
     "Auto-update is disabled in this distribution; download builds from the GitHub releases page";
 
+// Serialize complete frontend save attempts through their live-config side
+// effects. Backend-owned field mutations intentionally do not take this lock:
+// the field-level CAS rollback below preserves them without allowing a second
+// same-value frontend save to be mistaken for the first attempt (ABA).
+static SAVE_SETTINGS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn merge_settings_for_save(
     mut incoming: crate::settings::AppSettings,
     existing: &crate::settings::AppSettings,
@@ -60,12 +66,23 @@ pub async fn save_settings(
     state: tauri::State<'_, crate::store::AppState>,
     settings: crate::settings::AppSettings,
 ) -> Result<bool, String> {
-    let existing = crate::settings::get_settings();
-    let merged = merge_settings_for_save(settings, &existing);
-    let unify_codex_changed =
-        merged.unify_codex_session_history != existing.unify_codex_session_history;
-    let unify_codex_enabled = merged.unify_codex_session_history;
-    crate::settings::update_settings(merged).map_err(|e| e.to_string())?;
+    let _save_guard = SAVE_SETTINGS_LOCK.lock().await;
+
+    // Merge the frontend snapshot with the latest backend-owned fields while
+    // holding the settings write lock. Background migration/status mutations
+    // use the same transaction primitive, so neither side can replay a stale
+    // whole-settings snapshot over the other's commit.
+    let (existing, unify_codex_changed, unify_codex_enabled) =
+        crate::settings::update_settings_with(|existing| {
+            let merged = merge_settings_for_save(settings, existing);
+            let outcome = (
+                existing.clone(),
+                merged.unify_codex_session_history != existing.unify_codex_session_history,
+                merged.unify_codex_session_history,
+            );
+            (merged, outcome)
+        })
+        .map_err(|e| e.to_string())?;
 
     // 统一会话开关变更时立即重写当前官方 Codex 供应商的 live 配置，
     // 不必等下一次切换才生效。
@@ -73,17 +90,16 @@ pub async fn save_settings(
         // live 重写失败时回滚设置并把保存整体报失败：若设置保持已切换状态，
         // live 仍跑旧桶，后续的历史迁移/还原会让会话再次分裂（开启=历史
         // 迁走而新会话仍写 openai 桶；关闭=会话还原而 live 仍写 custom）。
-        // 报错让前端 saved=false 短路还原；回滚是整次保存的事务语义
-        // （本开关的保存只携带开关相关字段）。
+        // 报错让前端 saved=false 短路还原。回滚只对本开关做字段级 CAS，
+        // 不能覆盖 live 重写期间提交的后台状态或其他用户设置。
         if let Err(err) =
             crate::services::provider::reapply_current_codex_official_live(state.inner())
         {
             log::warn!("统一 Codex 会话历史开关变更后重写 live 配置失败，回滚设置: {err}");
-            if let Err(rollback_err) = crate::settings::update_settings(existing) {
-                log::error!("回滚统一会话开关设置失败: {rollback_err}");
-            }
-            return Err(format!(
-                "统一 Codex 会话历史开关未生效（live 配置重写失败）: {err}"
+            return Err(rollback_codex_unify_after_live_reapply_failure(
+                unify_codex_enabled,
+                existing.unify_codex_session_history,
+                err,
             ));
         }
 
@@ -121,6 +137,24 @@ pub async fn save_settings(
         }
     }
     Ok(true)
+}
+
+fn rollback_codex_unify_after_live_reapply_failure(
+    attempted_value: bool,
+    previous_value: bool,
+    live_error: impl std::fmt::Display,
+) -> String {
+    let prefix = format!("统一 Codex 会话历史开关未生效（live 配置重写失败）: {live_error}");
+    match crate::settings::rollback_unify_codex_session_history_if_matches(
+        attempted_value,
+        previous_value,
+    ) {
+        Ok(true) => format!("{prefix}; 已仅回滚本次开关变更"),
+        Ok(false) => format!("{prefix}; 开关已被较新的设置事务改动，未覆盖该较新值"),
+        Err(rollback_error) => {
+            format!("{prefix}; 回滚本次开关变更也失败: {rollback_error}")
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -237,12 +271,14 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_settings_for_save;
+    use super::{merge_settings_for_save, rollback_codex_unify_after_live_reapply_failure};
+    use crate::app_config::AppType;
     use crate::settings::{
         AppSettings, CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
         CodexThirdPartyHistoryProviderBucketMigration, LocalMigrations, S3SyncSettings,
         WebDavSyncSettings,
     };
+    use serial_test::serial;
 
     #[test]
     fn save_settings_should_preserve_existing_webdav_when_payload_omits_it() {
@@ -542,6 +578,148 @@ mod tests {
         assert!(merged.local_migrations.is_none());
     }
 
+    #[test]
+    #[serial]
+    fn failed_live_reapply_rolls_back_only_flag_and_preserves_background_commit() {
+        let ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        let (previous_value, attempted_value) = crate::settings::update_settings_with(|current| {
+            let mut next = current.clone();
+            let previous_value = next.unify_codex_session_history;
+            next.unify_codex_session_history = true;
+            (next, (previous_value, true))
+        })
+        .expect("commit frontend settings save");
+        assert!(!previous_value);
+        assert!(attempted_value);
+
+        // Model a backend-owned settings mutation committing while the live
+        // rewrite is still running.
+        crate::settings::set_current_provider(&AppType::Codex, Some("background-provider"))
+            .expect("commit background settings mutation");
+
+        let error = rollback_codex_unify_after_live_reapply_failure(
+            attempted_value,
+            previous_value,
+            "forced live rewrite failure",
+        );
+        assert!(error.contains("forced live rewrite failure"));
+        assert!(error.contains("已仅回滚本次开关变更"));
+
+        let cached = crate::settings::get_settings();
+        assert!(!cached.unify_codex_session_history);
+        assert_eq!(
+            cached.current_provider_codex.as_deref(),
+            Some("background-provider")
+        );
+
+        let disk: AppSettings = serde_json::from_str(
+            &std::fs::read_to_string(ambient.home().join(".cc-switch/settings.json"))
+                .expect("read persisted settings"),
+        )
+        .expect("parse persisted settings");
+        assert_eq!(
+            disk.unify_codex_session_history,
+            cached.unify_codex_session_history
+        );
+        assert_eq!(disk.current_provider_codex, cached.current_provider_codex);
+    }
+
+    #[test]
+    #[serial]
+    fn failed_live_reapply_does_not_overwrite_newer_user_flag_value() {
+        let _ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        crate::settings::update_settings_with(|current| {
+            let mut next = current.clone();
+            next.unify_codex_session_history = true;
+            (next, ())
+        })
+        .expect("commit attempted save");
+        crate::settings::update_settings_with(|current| {
+            let mut next = current.clone();
+            next.unify_codex_session_history = false;
+            (next, ())
+        })
+        .expect("commit newer user save");
+
+        let error = rollback_codex_unify_after_live_reapply_failure(
+            true,
+            false,
+            "forced live rewrite failure",
+        );
+        assert!(error.contains("开关已被较新的设置事务改动"));
+        assert!(!crate::settings::get_settings().unify_codex_session_history);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn same_value_frontend_save_waits_for_prior_failed_save_rollback() {
+        let _ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        let (first_committed_tx, first_committed_rx) = tokio::sync::oneshot::channel();
+        let (release_failure_tx, release_failure_rx) = tokio::sync::oneshot::channel();
+
+        let first = tokio::spawn(async move {
+            let _save_guard = super::SAVE_SETTINGS_LOCK.lock().await;
+            crate::settings::update_settings_with(|current| {
+                let mut next = current.clone();
+                next.unify_codex_session_history = true;
+                (next, ())
+            })
+            .expect("commit first save");
+            first_committed_tx.send(()).expect("signal first commit");
+            release_failure_rx
+                .await
+                .expect("release first live failure");
+            let error = super::rollback_codex_unify_after_live_reapply_failure(
+                true,
+                false,
+                "forced first live rewrite failure",
+            );
+            assert!(error.contains("已仅回滚本次开关变更"));
+        });
+        first_committed_rx.await.expect("first save committed");
+
+        let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
+        let (second_done_tx, mut second_done_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(async move {
+            second_started_tx.send(()).expect("signal second start");
+            let _save_guard = super::SAVE_SETTINGS_LOCK.lock().await;
+            let changed = crate::settings::update_settings_with(|current| {
+                let mut next = current.clone();
+                let changed = !current.unify_codex_session_history;
+                next.unify_codex_session_history = true;
+                (next, changed)
+            })
+            .expect("commit second save");
+            second_done_tx
+                .send(changed)
+                .expect("signal second completion");
+        });
+        second_started_rx.await.expect("second save started");
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second_done_rx,)
+                .await
+                .is_err(),
+            "the second frontend save must wait while the first live rewrite can still roll back"
+        );
+
+        release_failure_tx
+            .send(())
+            .expect("trigger first live failure");
+        let second_saw_change =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut second_done_rx)
+                .await
+                .expect("second save should finish after rollback")
+                .expect("receive second result");
+        assert!(
+            second_saw_change,
+            "after the first rollback, the second save must re-read false and apply true again"
+        );
+        first.await.expect("join first save");
+        second.await.expect("join second save");
+        assert!(crate::settings::get_settings().unify_codex_session_history);
+    }
+
     /// F-001 回归：本发行版的更新命令必须保持禁用桩——install 报"已禁用"错误、
     /// check 恒 None，绝不触达（已移除的）updater 插件状态。
     #[tokio::test]
@@ -671,6 +849,7 @@ pub async fn get_codex_continue_config(
     state
         .db
         .get_codex_continue_config()
+        .map(crate::proxy::codex_continue::CodexContinueConfig::normalized)
         .map_err(|e| e.to_string())
 }
 
@@ -680,11 +859,7 @@ pub async fn set_codex_continue_config(
     state: tauri::State<'_, crate::AppState>,
     config: crate::proxy::codex_continue::CodexContinueConfig,
 ) -> Result<bool, String> {
-    let mut normalized = config;
-    normalized.step = normalized.step.max(3);
-    if normalized.marker.trim().is_empty() {
-        normalized.marker = crate::proxy::codex_continue::CodexContinueConfig::default().marker;
-    }
+    let normalized = config.normalized();
     state
         .db
         .set_codex_continue_config(&normalized)

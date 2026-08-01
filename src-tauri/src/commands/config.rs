@@ -446,26 +446,22 @@ pub async fn read_grok_global_config() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub async fn write_grok_global_config(content: String) -> Result<(), String> {
-    crate::grok_config::write_grok_live_settings(&serde_json::json!({ "config": content }))
-        .map_err(|e| e.to_string())
+pub async fn write_grok_global_config(
+    state: State<'_, AppState>,
+    content: String,
+) -> Result<String, String> {
+    state.proxy_service.write_grok_global_config(content).await
 }
 
 #[tauri::command]
 pub async fn merge_grok_profile_into_global_config(
+    state: State<'_, AppState>,
     profile_content: String,
 ) -> Result<String, String> {
-    let path = crate::grok_config::get_grok_config_path();
-    let live = if path.exists() {
-        std::fs::read_to_string(&path).map_err(|error| error.to_string())?
-    } else {
-        String::new()
-    };
-    let merged = crate::grok_config::merge_provider_profile_config_text(&live, &profile_content)
-        .map_err(|e| e.to_string())?;
-    crate::grok_config::write_grok_live_settings(&serde_json::json!({ "config": merged }))
-        .map_err(|e| e.to_string())?;
-    Ok(merged)
+    state
+        .proxy_service
+        .merge_grok_profile_into_global_config(profile_content)
+        .await
 }
 
 #[tauri::command]
@@ -480,8 +476,14 @@ pub async fn list_grok_config_backups() -> Result<Vec<crate::grok_config::GrokCo
 }
 
 #[tauri::command]
-pub async fn restore_grok_config_backup(filename: String) -> Result<String, String> {
-    crate::grok_config::restore_grok_config_backup(&filename).map_err(|e| e.to_string())
+pub async fn restore_grok_config_backup(
+    state: State<'_, AppState>,
+    filename: String,
+) -> Result<String, String> {
+    state
+        .proxy_service
+        .restore_grok_global_config_backup(&filename)
+        .await
 }
 
 #[tauri::command]

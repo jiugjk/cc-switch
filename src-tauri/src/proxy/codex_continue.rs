@@ -6,6 +6,7 @@
 use super::{
     forwarder::{ActiveConnectionGuard, RequestForwarder},
     hyper_client::ProxyResponse,
+    providers::{provider_needs_responses_namespace_flatten, transform_codex_responses_namespace},
     sse::{append_utf8_safe, strip_sse_field, take_sse_block},
 };
 use crate::{app_config::AppType, provider::Provider};
@@ -20,6 +21,7 @@ use serde_json::{json, Map, Value};
 
 const DEFAULT_STEP: u64 = 518;
 const DEFAULT_MAX_CONTINUATIONS: usize = 8;
+pub(crate) const MAX_CONTINUATIONS: usize = 32;
 const DEFAULT_MARKER: &str =
     "We need continue thinking. Do not summarize; continue from the previous reasoning state.";
 const ENCRYPTED_INCLUDE: &str = "reasoning.encrypted_content";
@@ -51,10 +53,20 @@ impl CodexContinueConfig {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or(settings.marker),
         }
+        .normalized()
     }
 
     pub(crate) fn from_env() -> Self {
         Self::from_settings_with_env(Self::default())
+    }
+
+    pub(crate) fn normalized(mut self) -> Self {
+        self.max_continuations = self.max_continuations.min(MAX_CONTINUATIONS);
+        self.step = self.step.max(3);
+        if self.marker.trim().is_empty() {
+            self.marker = default_marker();
+        }
+        self
     }
 }
 
@@ -242,6 +254,23 @@ fn terminal_event(event: &Value) -> bool {
         event_type(event),
         "response.completed" | "response.incomplete" | "response.failed"
     )
+}
+
+fn terminal_allows_continuation(event: &Value) -> bool {
+    matches!(
+        event_type(event),
+        "response.completed" | "response.incomplete"
+    ) && !matches!(
+        event
+            .get("response")
+            .and_then(|response| response.get("status"))
+            .and_then(Value::as_str),
+        Some("failed" | "cancelled")
+    )
+}
+
+fn round_terminal_allows_continuation(terminal: Option<&Value>, saw_error_event: bool) -> bool {
+    !saw_error_event && terminal.is_some_and(terminal_allows_continuation)
 }
 
 fn output_index(event: &Value) -> Option<Value> {
@@ -493,6 +522,13 @@ fn reconstruct_terminal(
         if let Some(details) = terminal_response.get("incomplete_details").cloned() {
             resp.insert("incomplete_details".to_string(), details);
         }
+        // `response.created` normally carries `error: null`, while the final
+        // `response.failed` contains the structured upstream failure. Since the
+        // folded response is based on the created snapshot, copy the terminal
+        // field explicitly or the client receives a failed event with no cause.
+        if let Some(error) = terminal_response.get("error").cloned() {
+            resp.insert("error".to_string(), error);
+        }
         resp.insert(
             "output".to_string(),
             Value::Array(reconstruction.final_output.to_vec()),
@@ -616,6 +652,36 @@ struct BufferedItem {
     item: Value,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct CodexContinueRoundAttribution {
+    pub(crate) round: usize,
+    pub(crate) provider_id: String,
+    pub(crate) outbound_model: Option<String>,
+    pub(crate) response_model: Option<String>,
+    pub(crate) usage: Option<Value>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CodexContinueAttribution {
+    rounds: std::sync::Arc<std::sync::Mutex<Vec<CodexContinueRoundAttribution>>>,
+}
+
+impl CodexContinueAttribution {
+    fn record(&self, round: CodexContinueRoundAttribution) {
+        self.rounds
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(round);
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<CodexContinueRoundAttribution> {
+        self.rounds
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
 pub(crate) struct FoldedProxyResponseArgs {
     pub(crate) first_response: ProxyResponse,
     pub(crate) first_connection_guard: Option<ActiveConnectionGuard>,
@@ -627,6 +693,13 @@ pub(crate) struct FoldedProxyResponseArgs {
     pub(crate) extensions: Extensions,
     pub(crate) providers: Vec<Provider>,
     pub(crate) config: CodexContinueConfig,
+    pub(crate) first_provider: Provider,
+    pub(crate) first_outbound_model: Option<String>,
+}
+
+pub(crate) struct FoldedProxyResponse {
+    pub(crate) response: ProxyResponse,
+    pub(crate) attribution: CodexContinueAttribution,
 }
 
 struct FoldContinuationRequest {
@@ -638,6 +711,9 @@ struct FoldContinuationRequest {
     extensions: Extensions,
     providers: Vec<Provider>,
     config: CodexContinueConfig,
+    first_provider: Provider,
+    first_outbound_model: Option<String>,
+    attribution: CodexContinueAttribution,
 }
 
 fn flush_buffered_item(
@@ -660,13 +736,30 @@ fn flush_buffered_item(
     (out, final_item)
 }
 
-pub(crate) fn build_folded_proxy_response(args: FoldedProxyResponseArgs) -> ProxyResponse {
+fn drain_buffered_items(
+    buffered_items: &mut Vec<BufferedItem>,
+    downstream_output_index: &mut usize,
+    seq: &mut u64,
+) -> (Vec<Bytes>, Vec<Value>) {
+    let mut chunks = Vec::new();
+    let mut final_items = Vec::new();
+    for buffered in std::mem::take(buffered_items) {
+        let (item_chunks, item) = flush_buffered_item(buffered, *downstream_output_index, seq);
+        chunks.extend(item_chunks);
+        *downstream_output_index += 1;
+        final_items.push(item);
+    }
+    (chunks, final_items)
+}
+
+pub(crate) fn build_folded_proxy_response(args: FoldedProxyResponseArgs) -> FoldedProxyResponse {
     let status = args.first_response.status();
     let mut response_headers = args.first_response.headers().clone();
     response_headers.remove(CONTENT_LENGTH);
     response_headers.remove(CONTENT_ENCODING);
     response_headers.remove(TRANSFER_ENCODING);
     response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    let attribution = CodexContinueAttribution::default();
     let stream = fold_responses_stream(
         args.first_response,
         args.first_connection_guard,
@@ -679,9 +772,15 @@ pub(crate) fn build_folded_proxy_response(args: FoldedProxyResponseArgs) -> Prox
             extensions: args.extensions,
             providers: args.providers,
             config: args.config,
+            first_provider: args.first_provider,
+            first_outbound_model: args.first_outbound_model,
+            attribution: attribution.clone(),
         },
     );
-    ProxyResponse::streamed(status, response_headers, stream)
+    FoldedProxyResponse {
+        response: ProxyResponse::streamed(status, response_headers, stream),
+        attribution,
+    }
 }
 
 fn fold_responses_stream(
@@ -701,7 +800,14 @@ fn fold_responses_stream(
             extensions,
             providers,
             config,
+            first_provider,
+            first_outbound_model,
+            attribution,
         } = continuation;
+        let namespace_restore_map =
+            transform_codex_responses_namespace::namespace_restore_map(&base_body);
+        let mut round_provider = first_provider;
+        let mut round_outbound_model = first_outbound_model;
         let mut round_no = 0usize;
         let mut continuations = 0usize;
         let mut seq = 0u64;
@@ -724,6 +830,7 @@ fn fold_responses_stream(
             let mut round_reasoning: Vec<Value> = Vec::new();
             let mut terminal: Option<Value> = None;
             let mut stream_error: Option<String> = None;
+            let mut saw_error_event = false;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -737,7 +844,16 @@ fn fold_responses_stream(
                     match frame {
                         SseFrame::Done => {}
                         SseFrame::Event(mut ev) => {
+                            if provider_needs_responses_namespace_flatten(&round_provider) {
+                                transform_codex_responses_namespace::restore_sse_event_namespaces(
+                                    &mut ev,
+                                    &namespace_restore_map,
+                                );
+                            }
                             let t = event_type(&ev).to_string();
+                            if t == "error" {
+                                saw_error_event = true;
+                            }
                             if t == "response.created" || t == "response.in_progress" {
                                 if round_no == 1 {
                                     if t == "response.created" {
@@ -819,8 +935,20 @@ fn fold_responses_stream(
             for frame in parser.finish() {
                 match frame {
                     SseFrame::Done => {},
-                    SseFrame::Event(ev) if terminal_event(&ev) => terminal = Some(ev),
                     SseFrame::Event(mut ev) => {
+                        if provider_needs_responses_namespace_flatten(&round_provider) {
+                            transform_codex_responses_namespace::restore_sse_event_namespaces(
+                                &mut ev,
+                                &namespace_restore_map,
+                            );
+                        }
+                        if event_type(&ev) == "error" {
+                            saw_error_event = true;
+                        }
+                        if terminal_event(&ev) {
+                            terminal = Some(ev);
+                            continue;
+                        }
                         set_sequence(&mut ev, &mut seq);
                         yield Ok(sse_event(&ev));
                     }
@@ -830,6 +958,21 @@ fn fold_responses_stream(
             let usage = terminal.as_ref().and_then(usage_from_terminal);
             let rt = reasoning_tokens(usage);
             usage_acc.add_round_usage(usage);
+            if terminal.is_some() {
+                attribution.record(CodexContinueRoundAttribution {
+                    round: round_no,
+                    provider_id: round_provider.id.clone(),
+                    outbound_model: round_outbound_model.clone(),
+                    response_model: terminal
+                        .as_ref()
+                        .and_then(|event| event.get("response"))
+                        .and_then(|response| response.get("model"))
+                        .and_then(Value::as_str)
+                        .filter(|model| !model.is_empty())
+                        .map(str::to_string),
+                    usage: usage.cloned(),
+                });
+            }
             let has_encrypted = round_reasoning
                 .last()
                 .map(has_encrypted_content)
@@ -838,7 +981,10 @@ fn fold_responses_stream(
             let has_pending_tool_output = buffered_items
                 .iter()
                 .any(|entry| buffered_item_blocks_continuation(&entry.item));
-            let can_continue = terminal.is_some()
+            let can_continue = round_terminal_allows_continuation(
+                terminal.as_ref(),
+                saw_error_event,
+            )
                 && truncated
                 && has_encrypted
                 && !has_pending_tool_output
@@ -849,11 +995,23 @@ fn fold_responses_stream(
                 "truncated": truncated,
                 "has_encrypted_content": has_encrypted,
                 "pending_tool_output": has_pending_tool_output,
+                "provider_id": round_provider.id.clone(),
+                "outbound_model": round_outbound_model.clone(),
+                "error_event": saw_error_event,
                 "continued": can_continue,
             }));
 
             if let Some(error) = stream_error {
                 log::warn!("[CodexContinue] round {round_no} upstream stream error: {error}");
+                let (chunks, items) = drain_buffered_items(
+                    &mut buffered_items,
+                    &mut downstream_output_index,
+                    &mut seq,
+                );
+                for chunk in chunks {
+                    yield Ok(chunk);
+                }
+                final_output.extend(items);
                 let public_usage = usage_acc.public_usage();
                 let metadata_usage = MetadataUsage {
                     public_usage: &public_usage,
@@ -910,6 +1068,15 @@ fn fold_responses_stream(
                                 response.status().as_u16(),
                                 response.is_sse()
                             );
+                            let (chunks, items) = drain_buffered_items(
+                                &mut buffered_items,
+                                &mut downstream_output_index,
+                                &mut seq,
+                            );
+                            for chunk in chunks {
+                                yield Ok(chunk);
+                            }
+                            final_output.extend(items);
                             let public_usage = usage_acc.public_usage();
                             let metadata_usage = MetadataUsage {
                                 public_usage: &public_usage,
@@ -929,6 +1096,8 @@ fn fold_responses_stream(
                             yield Ok(sse_done());
                             break;
                         }
+                        round_provider = result.provider;
+                        round_outbound_model = result.outbound_model;
                         continue;
                     }
                     Err(err) => {
@@ -937,6 +1106,15 @@ fn fold_responses_stream(
                             round_no + 1,
                             err.error
                         );
+                        let (chunks, items) = drain_buffered_items(
+                            &mut buffered_items,
+                            &mut downstream_output_index,
+                            &mut seq,
+                        );
+                        for chunk in chunks {
+                            yield Ok(chunk);
+                        }
+                        final_output.extend(items);
                         let public_usage = usage_acc.public_usage();
                         let metadata_usage = MetadataUsage {
                             public_usage: &public_usage,
@@ -959,7 +1137,14 @@ fn fold_responses_stream(
                 }
             }
 
-            let stopped_reason = if truncated && !has_encrypted {
+            let stopped_reason = if saw_error_event {
+                Some("upstream_error_event")
+            } else if terminal
+                .as_ref()
+                .is_some_and(|event| event_type(event) == "response.failed")
+            {
+                Some("response_failed")
+            } else if truncated && !has_encrypted {
                 Some("no_encrypted_content")
             } else if truncated && has_pending_tool_output {
                 // 命中截断指纹但本轮已有待执行的工具调用：按完成响应下发，
@@ -974,6 +1159,15 @@ fn fold_responses_stream(
             };
 
             if terminal.is_none() {
+                let (chunks, items) = drain_buffered_items(
+                    &mut buffered_items,
+                    &mut downstream_output_index,
+                    &mut seq,
+                );
+                for chunk in chunks {
+                    yield Ok(chunk);
+                }
+                final_output.extend(items);
                 let public_usage = usage_acc.public_usage();
                 let metadata_usage = MetadataUsage {
                     public_usage: &public_usage,
@@ -984,7 +1178,7 @@ fn fold_responses_stream(
                     base_response.as_ref(),
                     &final_output,
                     &rounds,
-                    "upstream_eof",
+                    stopped_reason.unwrap_or("upstream_eof"),
                     metadata_usage,
                     round_no,
                     &mut seq,
@@ -994,14 +1188,15 @@ fn fold_responses_stream(
                 break;
             }
 
-            for buffered in std::mem::take(&mut buffered_items) {
-                let (chunks, item) = flush_buffered_item(buffered, downstream_output_index, &mut seq);
-                for chunk in chunks {
-                    yield Ok(chunk);
-                }
-                downstream_output_index += 1;
-                final_output.push(item);
+            let (chunks, items) = drain_buffered_items(
+                &mut buffered_items,
+                &mut downstream_output_index,
+                &mut seq,
+            );
+            for chunk in chunks {
+                yield Ok(chunk);
             }
+            final_output.extend(items);
 
             let public_usage = usage_acc.public_usage();
             let metadata_usage = MetadataUsage {
@@ -1031,6 +1226,7 @@ fn fold_responses_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn truncation_formula_matches_518n_minus_2() {
@@ -1039,6 +1235,155 @@ mod tests {
         assert!(!is_truncation_pattern(Some(515), 518));
         assert!(!is_truncation_pattern(Some(517), 518));
         assert!(!is_truncation_pattern(None, 518));
+    }
+
+    #[test]
+    fn failed_or_cancelled_terminal_never_allows_continuation() {
+        assert!(!terminal_allows_continuation(&json!({
+            "type": "response.failed",
+            "response": { "status": "failed" }
+        })));
+        assert!(!terminal_allows_continuation(&json!({
+            "type": "response.incomplete",
+            "response": { "status": "cancelled" }
+        })));
+        assert!(terminal_allows_continuation(&json!({
+            "type": "response.incomplete",
+            "response": { "status": "incomplete" }
+        })));
+        let completed = json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        });
+        assert!(round_terminal_allows_continuation(Some(&completed), false));
+        assert!(
+            !round_terminal_allows_continuation(Some(&completed), true),
+            "an error SSE event in the round must veto continuation"
+        );
+    }
+
+    #[test]
+    fn reconstructed_failed_terminal_preserves_structured_error() {
+        let base_response = json!({
+            "id": "resp-1",
+            "status": "in_progress",
+            "error": null,
+            "output": [],
+        });
+        let terminal = json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp-1",
+                "status": "failed",
+                "error": {
+                    "type": "server_error",
+                    "code": "upstream_failed",
+                    "message": "upstream exploded"
+                }
+            }
+        });
+        let public_usage = Map::new();
+        let proxy_billed_usage = Map::new();
+        let mut sequence = 0;
+
+        let reconstructed = reconstruct_terminal(
+            Some(terminal),
+            TerminalReconstruction {
+                base_response: Some(&base_response),
+                final_output: &[],
+                rounds: &[],
+                stopped_reason: Some("response_failed"),
+                usage: MetadataUsage {
+                    public_usage: &public_usage,
+                    proxy_billed_usage: &proxy_billed_usage,
+                    truncation_step: DEFAULT_STEP,
+                },
+                proxy_rounds: 1,
+            },
+            &mut sequence,
+        );
+
+        assert_eq!(reconstructed["type"], "response.failed");
+        assert_eq!(reconstructed["response"]["status"], "failed");
+        assert_eq!(
+            reconstructed["response"]["error"]["message"],
+            "upstream exploded"
+        );
+        assert_eq!(
+            reconstructed["response"]["error"]["code"],
+            "upstream_failed"
+        );
+    }
+
+    #[test]
+    fn draining_buffered_assistant_item_preserves_events_and_final_output() {
+        let mut buffered = vec![BufferedItem {
+            upstream_output_index: json!(7),
+            events: vec![
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 7,
+                    "item": { "type": "message", "content": [] }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 7,
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": "partial answer" }]
+                    }
+                }),
+            ],
+            item: json!({ "type": "message", "content": [] }),
+        }];
+        let mut output_index = 2;
+        let mut sequence = 10;
+
+        let (chunks, items) = drain_buffered_items(&mut buffered, &mut output_index, &mut sequence);
+
+        assert!(buffered.is_empty());
+        assert_eq!(output_index, 3);
+        assert_eq!(sequence, 12);
+        assert_eq!(items[0]["content"][0]["text"], "partial answer");
+        let emitted = String::from_utf8(
+            chunks
+                .into_iter()
+                .flat_map(|chunk| chunk.to_vec())
+                .collect(),
+        )
+        .expect("emitted SSE is UTF-8");
+        assert!(emitted.contains("partial answer"));
+        assert!(emitted.contains("\"output_index\":2"));
+    }
+
+    #[test]
+    fn settings_normalization_caps_continuations() {
+        let config = CodexContinueConfig {
+            max_continuations: usize::MAX,
+            step: 1,
+            marker: "   ".to_string(),
+            ..CodexContinueConfig::default()
+        }
+        .normalized();
+
+        assert_eq!(config.max_continuations, MAX_CONTINUATIONS);
+        assert_eq!(config.step, 3);
+        assert_eq!(config.marker, DEFAULT_MARKER);
+    }
+
+    #[test]
+    #[serial]
+    fn environment_override_is_also_capped() {
+        let previous = std::env::var_os("CCSWITCH_CODEX_CONTINUE_MAX");
+        std::env::set_var("CCSWITCH_CODEX_CONTINUE_MAX", "999999");
+        let config = CodexContinueConfig::from_settings_with_env(CodexContinueConfig::default());
+        match previous {
+            Some(value) => std::env::set_var("CCSWITCH_CODEX_CONTINUE_MAX", value),
+            None => std::env::remove_var("CCSWITCH_CODEX_CONTINUE_MAX"),
+        }
+
+        assert_eq!(config.max_continuations, MAX_CONTINUATIONS);
     }
 
     #[test]

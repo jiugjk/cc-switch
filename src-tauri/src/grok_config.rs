@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::{get_app_config_dir, get_home_dir, write_text_file};
@@ -264,6 +265,35 @@ fn parse_edit_document(config_toml: &str) -> Result<toml_edit::DocumentMut, AppE
         })
 }
 
+fn table_like_mut<'a>(
+    document: &'a mut toml_edit::DocumentMut,
+    section: &str,
+) -> Result<&'a mut dyn toml_edit::TableLike, AppError> {
+    if document.get(section).is_none() {
+        document[section] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    document
+        .get_mut(section)
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| {
+            AppError::localized(
+                "grokBuild.sectionNotTable",
+                format!("Grok Build 配置中的 {section} 必须是 TOML 表"),
+                format!("Grok Build configuration section {section} must be a TOML table"),
+            )
+        })
+}
+
+fn set_table_value(
+    document: &mut toml_edit::DocumentMut,
+    section: &str,
+    key: &str,
+    value: toml_edit::Item,
+) -> Result<(), AppError> {
+    table_like_mut(document, section)?.insert(key, value);
+    Ok(())
+}
+
 fn remove_table_key(document: &mut toml_edit::DocumentMut, section: &str, key: &str) {
     let remove_section = document
         .get_mut(section)
@@ -372,10 +402,30 @@ pub fn extract_provider_profile_from_settings(settings: &mut Value) -> Result<()
 /// Save so users can inspect the exact changes first.
 pub fn apply_privacy_protection_config_text(config_toml: &str) -> Result<String, AppError> {
     let mut document = parse_edit_document(config_toml)?;
-    document["features"]["telemetry"] = toml_edit::value(false);
-    document["telemetry"]["trace_upload"] = toml_edit::value(false);
-    document["telemetry"]["mixpanel_enabled"] = toml_edit::value(false);
-    document["harness"]["disable_codebase_upload"] = toml_edit::value(true);
+    set_table_value(
+        &mut document,
+        "features",
+        "telemetry",
+        toml_edit::value(false),
+    )?;
+    set_table_value(
+        &mut document,
+        "telemetry",
+        "trace_upload",
+        toml_edit::value(false),
+    )?;
+    set_table_value(
+        &mut document,
+        "telemetry",
+        "mixpanel_enabled",
+        toml_edit::value(false),
+    )?;
+    set_table_value(
+        &mut document,
+        "harness",
+        "disable_codebase_upload",
+        toml_edit::value(true),
+    )?;
     Ok(document.to_string())
 }
 
@@ -525,7 +575,12 @@ pub fn apply_proxy_takeover(
             "Grok Build configuration has no [model.<name>] entry to take over",
         ));
     }
-    document["endpoints"]["models_base_url"] = toml_edit::value(proxy_base_url);
+    set_table_value(
+        &mut document,
+        "endpoints",
+        "models_base_url",
+        toml_edit::value(proxy_base_url),
+    )?;
     Ok(document.to_string())
 }
 
@@ -552,6 +607,56 @@ pub fn has_proxy_placeholder(config_toml: &str, token_placeholder: &str) -> bool
                     .is_some_and(|api_key| api_key == token_placeholder)
             })
         })
+}
+
+/// Emergency cleanup used only when both the takeover restore backup and the
+/// provider SSOT are unavailable. Remove every field owned by takeover so no
+/// model can keep using a dead local route or the synthetic credential.
+pub fn remove_proxy_takeover_fields(
+    config_toml: &str,
+    token_placeholder: &str,
+    is_proxy_url: impl Fn(&str) -> bool,
+) -> Result<String, AppError> {
+    let mut document = parse_edit_document(config_toml)?;
+    if let Some(models) = document
+        .get_mut("model")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        for (_, item) in models.iter_mut() {
+            let Some(model) = item.as_table_like_mut() else {
+                continue;
+            };
+            if model.get("api_key").and_then(toml_edit::Item::as_str) == Some(token_placeholder) {
+                model.remove("api_key");
+            }
+            if model
+                .get("base_url")
+                .and_then(toml_edit::Item::as_str)
+                .is_some_and(&is_proxy_url)
+            {
+                model.remove("base_url");
+            }
+        }
+    }
+
+    let remove_endpoints = document
+        .get_mut("endpoints")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .is_some_and(|endpoints| {
+            if endpoints
+                .get("models_base_url")
+                .and_then(toml_edit::Item::as_str)
+                .is_some_and(&is_proxy_url)
+            {
+                endpoints.remove("models_base_url");
+            }
+            endpoints.is_empty()
+        });
+    if remove_endpoints {
+        document.as_table_mut().remove("endpoints");
+    }
+
+    Ok(document.to_string())
 }
 
 pub fn base_url_matches(config_toml: &str, predicate: impl FnOnce(&str) -> bool) -> bool {
@@ -630,13 +735,14 @@ fn backup_current_grok_config(path: &Path, next_config: &str) -> Result<Option<P
     }
 
     let backup_dir = get_grok_config_backup_dir();
+    ensure_secure_backup_dir(&backup_dir)?;
     let filename = format!(
         "{}{}.toml",
         GROK_CONFIG_BACKUP_PREFIX,
         Utc::now().format("%Y%m%d_%H%M%S_%9f")
     );
     let backup_path = backup_dir.join(filename);
-    write_text_file(&backup_path, &current)?;
+    write_secure_backup_file(&backup_path, &current)?;
 
     let backups = list_grok_config_backups()?;
     for stale in backups.into_iter().skip(MAX_GROK_CONFIG_BACKUPS) {
@@ -644,6 +750,41 @@ fn backup_current_grok_config(path: &Path, next_config: &str) -> Result<Option<P
         fs::remove_file(&stale_path).map_err(|error| AppError::io(&stale_path, error))?;
     }
     Ok(Some(backup_path))
+}
+
+fn ensure_secure_backup_dir(path: &Path) -> Result<(), AppError> {
+    fs::create_dir_all(path).map_err(|error| AppError::io(path, error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| AppError::io(path, error))?;
+    }
+    Ok(())
+}
+
+fn write_secure_backup_file(path: &Path, content: &str) -> Result<(), AppError> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| AppError::io(path, error))?
+    };
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| AppError::io(path, error))?;
+
+    file.write_all(content.as_bytes())
+        .map_err(|error| AppError::io(path, error))?;
+    file.flush().map_err(|error| AppError::io(path, error))?;
+    Ok(())
 }
 
 fn validated_backup_path(filename: &str) -> Result<PathBuf, AppError> {
@@ -667,6 +808,7 @@ pub fn list_grok_config_backups() -> Result<Vec<GrokConfigBackup>, AppError> {
     if !backup_dir.exists() {
         return Ok(Vec::new());
     }
+    ensure_secure_backup_dir(&backup_dir)?;
 
     let mut backups = Vec::new();
     let entries = fs::read_dir(&backup_dir).map_err(|error| AppError::io(&backup_dir, error))?;
@@ -686,6 +828,12 @@ pub fn list_grok_config_backups() -> Result<Vec<GrokConfigBackup>, AppError> {
         let metadata = entry
             .metadata()
             .map_err(|error| AppError::io(&path, error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| AppError::io(&path, error))?;
+        }
         let modified = metadata
             .modified()
             .ok()
@@ -702,11 +850,16 @@ pub fn list_grok_config_backups() -> Result<Vec<GrokConfigBackup>, AppError> {
     Ok(backups)
 }
 
-pub fn restore_grok_config_backup(filename: &str) -> Result<String, AppError> {
+pub fn read_grok_config_backup(filename: &str) -> Result<String, AppError> {
     let backup_path = validated_backup_path(filename)?;
     let config =
         fs::read_to_string(&backup_path).map_err(|error| AppError::io(&backup_path, error))?;
     validate_config_toml_syntax(&config)?;
+    Ok(config)
+}
+
+pub fn restore_grok_config_backup(filename: &str) -> Result<String, AppError> {
+    let config = read_grok_config_backup(filename)?;
     write_grok_live_settings(&json!({ "config": config }))?;
     Ok(config)
 }
@@ -938,6 +1091,45 @@ context_window = 500000
             document["model"]["worker"]["custom_flag"].as_bool(),
             Some(true)
         );
+    }
+
+    #[test]
+    fn privacy_and_takeover_reject_scalar_sections_without_panicking() {
+        let privacy_error = apply_privacy_protection_config_text("features = false\n")
+            .expect_err("scalar features section must be rejected");
+        assert!(privacy_error.to_string().contains("features"));
+
+        let config = format!("endpoints = \"legacy\"\n\n{}", valid_config());
+        let takeover_error = apply_proxy_takeover(
+            &config,
+            "http://127.0.0.1:15721/grokbuild/v1",
+            "PROXY_MANAGED",
+        )
+        .expect_err("scalar endpoints section must be rejected");
+        assert!(takeover_error.to_string().contains("endpoints"));
+    }
+
+    #[test]
+    fn emergency_cleanup_removes_takeover_fields_from_every_model_and_endpoint() {
+        let config = format!(
+            "{}\n[model.worker]\nmodel = \"worker-model\"\nbase_url = \"http://localhost:15721/grokbuild/v1\"\nname = \"Worker\"\napi_key = \"PROXY_MANAGED\"\napi_backend = \"responses\"\ncontext_window = 128000\n\n[endpoints]\nmodels_base_url = \"http://127.0.0.1:15721/grokbuild/v1\"\n",
+            valid_config()
+                .replace("https://example.com/v1", "http://127.0.0.1:15721/grokbuild/v1")
+                .replace("api_key = \"secret\"", "api_key = \"PROXY_MANAGED\"")
+        );
+
+        let cleaned = remove_proxy_takeover_fields(&config, "PROXY_MANAGED", |url| {
+            url.contains("127.0.0.1:15721") || url.contains("localhost:15721")
+        })
+        .expect("cleanup takeover fields");
+        let document = cleaned.parse::<toml::Value>().expect("cleaned TOML");
+        for model in document["model"].as_table().expect("model table").values() {
+            let model = model.as_table().expect("model profile");
+            assert!(!model.contains_key("api_key"));
+            assert!(!model.contains_key("base_url"));
+        }
+        assert!(document.get("endpoints").is_none());
+        assert!(!has_proxy_placeholder(&cleaned, "PROXY_MANAGED"));
     }
 
     #[test]
@@ -1228,6 +1420,22 @@ context_window = 500000
 
         let backups = list_grok_config_backups().expect("list backups");
         assert_eq!(backups.len(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = fs::metadata(get_grok_config_backup_dir())
+                .expect("backup dir metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = fs::metadata(&backups[0].path)
+                .expect("backup file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
         let filename = backups[0].filename.clone();
         assert_eq!(
             fs::read_to_string(&backups[0].path).expect("backup content"),

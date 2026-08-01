@@ -434,6 +434,21 @@ fn codex_auth_account_id(auth: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+fn codex_auth_has_oauth_token_credentials(auth: &Value) -> bool {
+    auth.get("tokens")
+        .and_then(Value::as_object)
+        .is_some_and(|tokens| {
+            ["id_token", "access_token", "refresh_token"]
+                .iter()
+                .any(|key| {
+                    tokens
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+        })
+}
+
 /// Merge a fresher live ChatGPT OAuth login into `base_auth`.
 ///
 /// Returns `Some(merged)` only when all of the following hold:
@@ -451,8 +466,16 @@ fn codex_auth_account_id(auth: &Value) -> Option<&str> {
 /// base keys (e.g. `OPENAI_API_KEY: null`) are kept as-is. Returns `None`
 /// when the base side must stay untouched.
 pub fn merge_fresher_live_codex_oauth(base_auth: &Value, live_auth: &Value) -> Option<Value> {
-    if !codex_auth_has_oauth_login_material(base_auth)
-        || !codex_auth_has_oauth_login_material(live_auth)
+    // Preservation is allowed only when both values carry credentials Codex
+    // can actually authenticate with. Metadata such as `last_refresh` and
+    // `tokens.account_id` is not OAuth material, and an API-key snapshot must
+    // never acquire a live ChatGPT token bundle just because that metadata is
+    // present.
+    if extract_codex_auth_api_key(base_auth).is_some()
+        || !codex_auth_has_credential_login_material(base_auth)
+        || !codex_auth_has_credential_login_material(live_auth)
+        || !codex_auth_has_oauth_token_credentials(base_auth)
+        || !codex_auth_has_oauth_token_credentials(live_auth)
     {
         return None;
     }
@@ -480,6 +503,26 @@ pub fn merge_fresher_live_codex_oauth(base_auth: &Value, live_auth: &Value) -> O
         }
     }
     Some(merged)
+}
+
+/// Cross-provider-row variant of [`merge_fresher_live_codex_oauth`].
+///
+/// A live auth cache and a snapshot from the *same* provider may both predate
+/// `tokens.account_id`; the general merge helper intentionally permits that
+/// both-missing case to avoid downgrading the current login. Fan-out is a
+/// different trust boundary: copying credentials into another DB row requires
+/// positive identity proof, so both account IDs must be present, non-empty,
+/// and exactly equal before the ordinary shape/freshness checks run.
+pub(crate) fn merge_fresher_live_codex_oauth_for_fan_out(
+    base_auth: &Value,
+    live_auth: &Value,
+) -> Option<Value> {
+    let base_account_id = codex_auth_account_id(base_auth)?;
+    let live_account_id = codex_auth_account_id(live_auth)?;
+    if base_account_id != live_account_id {
+        return None;
+    }
+    merge_fresher_live_codex_oauth(base_auth, live_auth)
 }
 
 /// Never downgrade the live ChatGPT OAuth login when writing a provider
@@ -4551,6 +4594,39 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
+    fn fan_out_merge_requires_non_empty_matching_account_ids() {
+        let stored_without_account = oauth_auth("stale", None, Some("2026-01-01T00:00:00Z"));
+        let live_without_account = oauth_auth("fresh", None, Some("2026-07-01T00:00:00Z"));
+
+        assert!(
+            merge_fresher_live_codex_oauth(&stored_without_account, &live_without_account)
+                .is_some(),
+            "same-provider live preservation keeps the legacy both-missing identity semantics"
+        );
+        assert!(
+            merge_fresher_live_codex_oauth_for_fan_out(
+                &stored_without_account,
+                &live_without_account,
+            )
+            .is_none(),
+            "cross-row fan-out must not copy credentials when neither row proves an identity"
+        );
+
+        let stored = oauth_auth("stale", Some("acct-1"), Some("2026-01-01T00:00:00Z"));
+        let same_account_live = oauth_auth("fresh", Some("acct-1"), Some("2026-07-01T00:00:00Z"));
+        assert!(
+            merge_fresher_live_codex_oauth_for_fan_out(&stored, &same_account_live).is_some(),
+            "matching non-empty account IDs permit the normal freshness merge"
+        );
+
+        let other_account_live = oauth_auth("fresh", Some("acct-2"), Some("2026-07-01T00:00:00Z"));
+        assert!(
+            merge_fresher_live_codex_oauth_for_fan_out(&stored, &other_account_live).is_none(),
+            "different proven identities must remain isolated"
+        );
+    }
+
+    #[test]
     fn merge_fresher_live_codex_oauth_requires_oauth_shape_on_both_sides() {
         let live = oauth_auth("fresh", Some("acct-1"), Some("2026-07-01T00:00:00Z"));
 
@@ -4559,8 +4635,28 @@ model_catalog_json = "cc-switch-model-catalog.json"
             "API-key-only rows are not OAuth-shaped and never receive tokens"
         );
         assert!(
+            merge_fresher_live_codex_oauth(
+                &json!({
+                    "OPENAI_API_KEY": "sk-key",
+                    "last_refresh": "2026-01-01T00:00:00Z",
+                    "tokens": { "account_id": "acct-1" }
+                }),
+                &live,
+            )
+            .is_none(),
+            "API-key rows with OAuth-looking metadata must never receive live tokens"
+        );
+        assert!(
             merge_fresher_live_codex_oauth(&json!({}), &live).is_none(),
             "empty official rows (login without auth write) stay empty"
+        );
+        assert!(
+            merge_fresher_live_codex_oauth(
+                &json!({ "personal_access_token": "pat", "last_refresh": "2026-01-01T00:00:00Z" }),
+                &live,
+            )
+            .is_none(),
+            "non-OAuth credential rows must not receive a ChatGPT token bundle"
         );
         let snapshot = oauth_auth("stale", Some("acct-1"), Some("2026-01-01T00:00:00Z"));
         assert!(

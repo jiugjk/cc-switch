@@ -1,4 +1,10 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -121,5 +127,96 @@ describe("DeepLinkImportDialog", () => {
     expect(screen.queryByText("tiny")).toBeNull();
     // No config preview section without config
     expect(screen.queryByText("deeplink.configDetails")).toBeNull();
+  });
+
+  it("preserves arrival order and cancel advances to the next queued event", async () => {
+    let releaseFirstMerge!: () => void;
+    const firstMergeGate = new Promise<void>((resolve) => {
+      releaseFirstMerge = resolve;
+    });
+    server.use(
+      http.post(
+        "http://tauri.local/merge_deeplink_config",
+        async ({ request }) => {
+          const body = (await request.json()) as {
+            request: Record<string, unknown>;
+          };
+          await firstMergeGate;
+          return HttpResponse.json(body.request);
+        },
+      ),
+    );
+
+    renderDialog();
+    await act(async () => {});
+    await act(async () => {
+      emitTauriEvent("deeplink-import", {
+        version: "1",
+        resource: "provider",
+        app: "hermes",
+        name: "First Slow Link",
+        apiKey: "first-key",
+        config: b64Json({ apiKey: "first-key" }),
+      });
+      emitTauriEvent("deeplink-import", {
+        version: "1",
+        resource: "provider",
+        app: "hermes",
+        name: "Second Fast Link",
+        apiKey: "second-key",
+      });
+    });
+
+    expect(screen.queryByText("Second Fast Link")).toBeNull();
+    await act(async () => releaseFirstMerge());
+    await screen.findByText("First Slow Link");
+    expect(screen.queryByText("Second Fast Link")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    await screen.findByText("Second Fast Link");
+    expect(screen.queryByText("First Slow Link")).toBeNull();
+  });
+
+  it("shows disabled MCP semantics unless enabled is explicitly true", async () => {
+    server.use(
+      http.post(
+        "http://tauri.local/merge_deeplink_config",
+        async ({ request }) => {
+          const body = (await request.json()) as {
+            request: Record<string, unknown>;
+          };
+          return HttpResponse.json(body.request);
+        },
+      ),
+    );
+    renderDialog();
+    await act(async () => {});
+    const config = b64Json({
+      mcpServers: { demo: { command: "echo", args: ["demo"] } },
+    });
+
+    await act(async () => {
+      emitTauriEvent("deeplink-import", {
+        version: "1",
+        resource: "mcp",
+        apps: "codex",
+        config,
+      });
+    });
+    await screen.findByText("deeplink.mcp.disabledNotice");
+    expect(screen.queryByText("deeplink.mcp.enabledWarning")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    await act(async () => {
+      emitTauriEvent("deeplink-import", {
+        version: "1",
+        resource: "mcp",
+        apps: "codex",
+        config,
+        enabled: true,
+      });
+    });
+    await screen.findByText("deeplink.mcp.enabledWarning");
+    expect(screen.queryByText("deeplink.mcp.disabledNotice")).toBeNull();
   });
 });

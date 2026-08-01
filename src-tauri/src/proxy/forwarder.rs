@@ -5,7 +5,7 @@
 use super::hyper_client::ProxyResponse;
 use super::{
     body_filter::filter_private_params_with_whitelist,
-    content_encoding::{decompress_body, get_content_encoding},
+    content_encoding::{decompress_body, decompress_body_with_limit, get_content_encoding},
     error::*,
     failover_switch::FailoverSwitchManager,
     json_canonical::{canonicalize_value, short_value_hash},
@@ -39,6 +39,59 @@ use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
+const MAX_ERROR_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+const MAX_ERROR_DECOMPRESSED_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_NON_STREAMING_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_NON_STREAMING_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const ERROR_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn collect_response_body_limited(
+    response: ProxyResponse,
+    max_bytes: usize,
+) -> Result<Bytes, ProxyError> {
+    let mut stream = Box::pin(response.bytes_stream());
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            ProxyError::ForwardFailed(format!("Failed to read response body: {error}"))
+        })?;
+        let next_len = body.len().saturating_add(chunk.len());
+        if next_len > max_bytes {
+            return Err(ProxyError::TransformError(format!(
+                "upstream non-streaming response body exceeds the {max_bytes}-byte safety limit"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(body))
+}
+
+/// Collect at most `max_bytes` for diagnostics. The boolean is true when bytes were omitted.
+async fn collect_response_body_prefix(
+    response: ProxyResponse,
+    max_bytes: usize,
+) -> Result<(Bytes, bool), ProxyError> {
+    let mut stream = Box::pin(response.bytes_stream());
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            ProxyError::ForwardFailed(format!("Failed to read response body: {error}"))
+        })?;
+        let remaining = max_bytes.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            return Ok((Bytes::from(body), true));
+        }
+        body.extend_from_slice(&chunk);
+        if body.len() == max_bytes {
+            if stream.next().await.is_some() {
+                return Ok((Bytes::from(body), true));
+            }
+            break;
+        }
+    }
+    Ok((Bytes::from(body), false))
+}
 
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
@@ -1904,13 +1957,17 @@ impl RequestForwarder {
                 continue;
             }
 
-            // --- Codex/OpenAI fingerprint headers — never leak to an Anthropic upstream ---
-            // These are client/session identifiers from the incoming Codex request,
-            // not Anthropic protocol headers. Forwarding them both leaks identity and
-            // can defeat strict gateway fingerprint checks.
+            // --- Codex/OpenAI fingerprint headers — only the built-in official target may
+            // receive the incoming account/session/SDK identity. Provider-specific OAuth
+            // headers are re-injected from `auth_headers` after this filter.
             // The full set lives in `is_codex_client_fingerprint_header` so it stays in one
             // place. (HeaderName is lowercased by the http crate, so a direct match is safe.)
-            if codex_responses_to_anthropic && is_codex_client_fingerprint_header(key_str) {
+            if should_drop_codex_client_fingerprint_header(
+                app_type,
+                codex_official_auth_passthrough,
+                codex_responses_to_anthropic,
+                key_str,
+            ) {
                 continue;
             }
 
@@ -2123,6 +2180,8 @@ impl RequestForwarder {
             .as_deref()
             .map(|u| u.starts_with("socks5"))
             .unwrap_or(false);
+        let implicit_proxy_may_be_configured =
+            upstream_proxy_url.is_none() && super::http_client::implicit_proxy_may_be_configured();
 
         let preserve_exact_header_case = should_preserve_exact_header_case(
             adapter.name(),
@@ -2132,11 +2191,15 @@ impl RequestForwarder {
         );
 
         // 发送请求
-        let response = if is_socks_proxy || !preserve_exact_header_case {
+        let response = if should_use_reqwest_transport(
+            is_socks_proxy,
+            preserve_exact_header_case,
+            implicit_proxy_may_be_configured,
+        ) {
             // OpenAI / Copilot / Codex 类后端不依赖原始 header 大小写；走 reqwest
             // 连接池，避免 raw TCP/TLS path 每次请求都重新握手。SOCKS5 也只能走 reqwest。
             log::debug!(
-                "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
+                "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy}, implicit_proxy={implicit_proxy_may_be_configured})"
             );
             let client = super::http_client::get();
             let mut request = client.request(method.clone(), &url);
@@ -2227,16 +2290,49 @@ impl RequestForwarder {
             // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
             // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
             let encoding = get_content_encoding(response.headers());
-            let raw = response.bytes().await?;
-            let decoded = match encoding {
-                Some(encoding) => match decompress_body(&encoding, &raw) {
-                    Ok(Some(decompressed)) => decompressed,
-                    // 不支持的编码 / 解压失败：退回原始字节，尽量保留可读信息
-                    _ => raw.to_vec(),
+            let body_result = tokio::time::timeout(
+                ERROR_BODY_TIMEOUT,
+                collect_response_body_prefix(response, MAX_ERROR_RESPONSE_BODY_BYTES),
+            )
+            .await;
+            let body_text = match body_result {
+                Err(_) => Some(format!(
+                    "Upstream error body omitted after the {}s safety timeout",
+                    ERROR_BODY_TIMEOUT.as_secs()
+                )),
+                Ok(Err(error)) => Some(format!(
+                    "Upstream error body could not be read safely: {error}"
+                )),
+                Ok(Ok((raw, true))) => {
+                    if encoding.is_some() {
+                        Some(format!(
+                            "Upstream compressed error body exceeded the {}-byte safety limit and was omitted",
+                            MAX_ERROR_RESPONSE_BODY_BYTES
+                        ))
+                    } else {
+                        let mut prefix = String::from_utf8_lossy(&raw).into_owned();
+                        prefix.push_str(&format!(
+                            "\n[CC Switch truncated the upstream error body at {} bytes]",
+                            MAX_ERROR_RESPONSE_BODY_BYTES
+                        ));
+                        Some(prefix)
+                    }
+                }
+                Ok(Ok((raw, false))) => match encoding {
+                    Some(encoding) => match decompress_body_with_limit(
+                        &encoding,
+                        &raw,
+                        MAX_ERROR_DECOMPRESSED_BODY_BYTES,
+                    ) {
+                        Ok(Some(decompressed)) => String::from_utf8(decompressed).ok(),
+                        Ok(None) => String::from_utf8(raw.to_vec()).ok(),
+                        Err(error) => Some(format!(
+                            "Upstream error body could not be decompressed safely: {error}"
+                        )),
+                    },
+                    None => String::from_utf8(raw.to_vec()).ok(),
                 },
-                None => raw.to_vec(),
             };
-            let body_text = String::from_utf8(decoded).ok();
 
             Err(ProxyError::UpstreamError {
                 status: status_code,
@@ -2254,27 +2350,42 @@ impl RequestForwarder {
         response: ProxyResponse,
         request_is_streaming: bool,
     ) -> Result<ProxyResponse, ProxyError> {
-        if request_is_streaming {
+        // A gateway may ignore `stream: true` and explicitly return a JSON
+        // document. Treat that as a non-streaming body: priming only its first
+        // chunk would leave the later handler to collect an unbounded body (and,
+        // with failover disabled, without any whole-body timeout). Real SSE and
+        // unlabelled streaming responses must keep the low-latency prime path.
+        if request_is_streaming && !response.is_json() {
             return self.prime_streaming_response(response).await;
-        }
-
-        if self.non_streaming_timeout.is_zero() {
-            return Ok(response);
         }
 
         let status = response.status();
         let headers = response.headers().clone();
-        let body_timeout = self.non_streaming_timeout;
-        let body = tokio::time::timeout(body_timeout, response.bytes())
-            .await
-            .map_err(|_| {
-                ProxyError::Timeout(format!(
-                    "响应体读取超时: {}s（上游发完响应头后 body 未到达）",
-                    body_timeout.as_secs()
-                ))
-            })??;
+        let body = self.collect_bounded_non_streaming_body(response).await?;
 
         Ok(ProxyResponse::buffered(status, headers, body))
+    }
+
+    async fn collect_bounded_non_streaming_body(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<Bytes, ProxyError> {
+        let body_timeout = if self.non_streaming_timeout.is_zero() {
+            DEFAULT_NON_STREAMING_BODY_TIMEOUT
+        } else {
+            self.non_streaming_timeout
+        };
+        tokio::time::timeout(
+            body_timeout,
+            collect_response_body_limited(response, MAX_NON_STREAMING_RESPONSE_BODY_BYTES),
+        )
+        .await
+        .map_err(|_| {
+            ProxyError::Timeout(format!(
+                "响应体读取超时: {}s（上游发完响应头后 body 未到达）",
+                body_timeout.as_secs()
+            ))
+        })?
     }
 
     /// Some Anthropic-compatible gateways return an Anthropic error envelope with
@@ -2287,7 +2398,7 @@ impl RequestForwarder {
         let status = response.status();
         let headers = response.headers().clone();
         let encoding = get_content_encoding(&headers);
-        let raw = response.bytes().await?;
+        let raw = self.collect_bounded_non_streaming_body(response).await?;
         let decoded = match encoding {
             Some(encoding) => match decompress_body(&encoding, &raw) {
                 Ok(Some(decompressed)) => decompressed,
@@ -2312,7 +2423,7 @@ impl RequestForwarder {
         let status = response.status();
         let headers = response.headers().clone();
         let encoding = get_content_encoding(&headers);
-        let raw = response.bytes().await?;
+        let raw = self.collect_bounded_non_streaming_body(response).await?;
         let decoded = match encoding {
             Some(encoding) => match decompress_body(&encoding, &raw) {
                 Ok(Some(decompressed)) => decompressed,
@@ -2929,6 +3040,17 @@ fn is_codex_client_fingerprint_header(key_str: &str) -> bool {
         || key_str.starts_with("x-codex-")
 }
 
+fn should_drop_codex_client_fingerprint_header(
+    app_type: &AppType,
+    target_is_builtin_official: bool,
+    codex_responses_to_anthropic: bool,
+    key_str: &str,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && is_codex_client_fingerprint_header(key_str)
+        && (codex_responses_to_anthropic || !target_is_builtin_official)
+}
+
 fn codex_anthropic_error_envelope_message(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("error") && value.get("error").is_none() {
@@ -3245,6 +3367,14 @@ fn headers_contain_proxy_placeholder(headers: &http::HeaderMap) -> bool {
             .map(|value| value.contains(PROXY_AUTH_PLACEHOLDER))
             .unwrap_or(false)
     })
+}
+
+fn should_use_reqwest_transport(
+    is_socks_proxy: bool,
+    preserve_exact_header_case: bool,
+    implicit_proxy_may_be_configured: bool,
+) -> bool {
+    is_socks_proxy || !preserve_exact_header_case || implicit_proxy_may_be_configured
 }
 
 fn should_preserve_exact_header_case(
@@ -3980,6 +4110,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_request_with_json_response_uses_whole_body_timeout() {
+        let forwarder = test_forwarder(Duration::from_millis(20), Duration::from_secs(1));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            headers,
+            futures::stream::once(async { Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{")) })
+                .chain(futures::stream::pending()),
+        );
+
+        let error = match forwarder
+            .prepare_success_response_for_failover(response, true)
+            .await
+        {
+            Ok(_) => panic!("explicit JSON must not return after only the first chunk"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ProxyError::Timeout(_)));
+    }
+
+    #[tokio::test]
+    async fn streaming_sse_still_returns_after_priming_first_chunk() {
+        let forwarder = test_forwarder(Duration::from_millis(20), Duration::from_secs(1));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            headers,
+            futures::stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: {}\n\n"))
+            })
+            .chain(futures::stream::pending()),
+        );
+
+        let prepared = tokio::time::timeout(
+            Duration::from_millis(100),
+            forwarder.prepare_success_response_for_failover(response, true),
+        )
+        .await
+        .expect("SSE priming must not wait for the full stream")
+        .expect("first SSE chunk should commit the stream");
+
+        assert!(prepared.is_sse());
+    }
+
+    #[tokio::test]
+    async fn bounded_body_reader_rejects_success_instead_of_truncating_json() {
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"1234")),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"5")),
+            ]),
+        );
+
+        let error = collect_response_body_limited(response, 4)
+            .await
+            .expect_err("oversized success response must fail");
+        assert!(
+            matches!(error, ProxyError::TransformError(message) if message.contains("4-byte safety limit"))
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_error_reader_returns_a_marked_prefix() {
+        let response = ProxyResponse::streamed(
+            StatusCode::BAD_GATEWAY,
+            HeaderMap::new(),
+            futures::stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"123")),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"456")),
+            ]),
+        );
+
+        let (body, truncated) = collect_response_body_prefix(response, 4).await.unwrap();
+        assert_eq!(body, Bytes::from_static(b"1234"));
+        assert!(truncated);
+    }
+
+    #[tokio::test]
     async fn streaming_success_primes_first_chunk_and_replays_it() {
         let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
         let response = ProxyResponse::streamed(
@@ -4326,6 +4544,42 @@ mod tests {
                 "{header} must be preserved while impersonating Claude Code"
             );
         }
+    }
+
+    #[test]
+    fn codex_client_identity_is_only_allowed_to_builtin_official_target() {
+        assert!(!should_drop_codex_client_fingerprint_header(
+            &AppType::Codex,
+            true,
+            false,
+            "chatgpt-account-id",
+        ));
+        assert!(should_drop_codex_client_fingerprint_header(
+            &AppType::Codex,
+            false,
+            false,
+            "chatgpt-account-id",
+        ));
+        assert!(should_drop_codex_client_fingerprint_header(
+            &AppType::Codex,
+            false,
+            false,
+            "x-stainless-runtime",
+        ));
+        assert!(!should_drop_codex_client_fingerprint_header(
+            &AppType::Claude,
+            false,
+            false,
+            "chatgpt-account-id",
+        ));
+    }
+
+    #[test]
+    fn implicit_proxy_forces_safe_reqwest_fallback() {
+        assert!(should_use_reqwest_transport(false, true, true));
+        assert!(!should_use_reqwest_transport(false, true, false));
+        assert!(should_use_reqwest_transport(true, true, false));
+        assert!(should_use_reqwest_transport(false, false, false));
     }
 
     #[test]

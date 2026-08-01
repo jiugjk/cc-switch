@@ -130,6 +130,21 @@ pub fn apply_provider(db: &Database, provider: &Provider) -> Result<(), AppError
     apply_provider_to_paths(db, provider, &paths)
 }
 
+/// Files mutated by `apply_provider` / official restore.
+///
+/// Provider switching uses this list to take an outer byte-for-byte snapshot
+/// that remains available until the current-provider pointers commit. The
+/// inner `with_rollback` still protects failures inside a single apply call.
+pub(crate) fn provider_live_file_paths() -> Result<Vec<PathBuf>, AppError> {
+    let paths = current_platform_paths()?;
+    Ok(vec![
+        paths.normal_config_path,
+        paths.threep_config_path,
+        paths.profile_path,
+        paths.meta_path,
+    ])
+}
+
 pub fn get_status(db: &Database, proxy_running: bool) -> Result<ClaudeDesktopStatus, AppError> {
     if !is_supported_platform() {
         return Ok(ClaudeDesktopStatus {

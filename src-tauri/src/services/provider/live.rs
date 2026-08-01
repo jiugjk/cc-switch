@@ -2,14 +2,14 @@
 //!
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
-use std::collections::HashMap;
+use std::{fs, path::PathBuf};
 
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
-use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
+use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -949,76 +949,104 @@ pub(crate) fn normalize_provider_common_config_for_storage(
     Ok(())
 }
 
-/// Live configuration snapshot for backup/restore
-#[derive(Clone)]
-#[allow(dead_code)]
-pub(crate) enum LiveSnapshot {
-    Claude {
-        settings: Option<Value>,
-    },
-    Codex {
-        auth: Option<Value>,
-        config: Option<String>,
-    },
-    Gemini {
-        env: Option<HashMap<String, String>>,
-        config: Option<Value>,
-    },
+#[derive(Debug)]
+struct LiveFileSnapshot {
+    path: PathBuf,
+    content: Option<Vec<u8>>,
+    permissions: Option<fs::Permissions>,
 }
 
-impl LiveSnapshot {
-    #[allow(dead_code)]
+/// Byte-for-byte snapshot of every active file a provider writer can touch.
+///
+/// This deliberately snapshots raw bytes rather than rebuilding the previous
+/// provider from DB state: live files may contain newer manual edits, unknown
+/// fields, comments, or formatting that backfill could not persist. This is
+/// also used for live-managed additive provider updates. Missing files and
+/// existing permissions are part of the snapshot as well.
+#[derive(Debug)]
+pub(crate) struct LiveFilesSnapshot {
+    files: Vec<LiveFileSnapshot>,
+}
+
+impl LiveFilesSnapshot {
+    pub(crate) fn capture(app_type: &AppType) -> Result<Self, AppError> {
+        let paths = provider_live_file_paths(app_type)?;
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(AppError::io(&path, error)),
+            };
+            let (content, permissions) = match metadata {
+                Some(metadata) => (
+                    Some(fs::read(&path).map_err(|error| AppError::io(&path, error))?),
+                    Some(metadata.permissions()),
+                ),
+                None => (None, None),
+            };
+            files.push(LiveFileSnapshot {
+                path,
+                content,
+                permissions,
+            });
+        }
+        Ok(Self { files })
+    }
+
     pub(crate) fn restore(&self) -> Result<(), AppError> {
-        match self {
-            LiveSnapshot::Claude { settings } => {
-                let path = get_claude_settings_path();
-                if let Some(value) = settings {
-                    write_json_file(&path, value)?;
-                } else if path.exists() {
-                    delete_file(&path)?;
-                }
-            }
-            LiveSnapshot::Codex { auth, config } => {
-                let auth_path = get_codex_auth_path();
-                let config_path = get_codex_config_path();
-                if let Some(value) = auth {
-                    write_json_file(&auth_path, value)?;
-                } else if auth_path.exists() {
-                    delete_file(&auth_path)?;
-                }
-
-                if let Some(text) = config {
-                    crate::config::write_text_file(&config_path, text)?;
-                } else if config_path.exists() {
-                    delete_file(&config_path)?;
-                }
-            }
-            LiveSnapshot::Gemini { env, .. } => {
-                use crate::gemini_config::{
-                    get_gemini_env_path, get_gemini_settings_path, write_gemini_env_atomic,
-                };
-                let path = get_gemini_env_path();
-                if let Some(env_map) = env {
-                    write_gemini_env_atomic(env_map)?;
-                } else if path.exists() {
-                    delete_file(&path)?;
-                }
-
-                let settings_path = get_gemini_settings_path();
-                match self {
-                    LiveSnapshot::Gemini {
-                        config: Some(cfg), ..
-                    } => {
-                        write_json_file(&settings_path, cfg)?;
-                    }
-                    LiveSnapshot::Gemini { config: None, .. } if settings_path.exists() => {
-                        delete_file(&settings_path)?;
-                    }
-                    _ => {}
-                }
+        let mut failures = Vec::new();
+        for snapshot in &self.files {
+            if let Err(error) = restore_live_file_snapshot(snapshot) {
+                failures.push(format!("{}: {error}", snapshot.path.display()));
             }
         }
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(format!(
+                "恢复 Live 文件快照失败: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+}
+
+fn restore_live_file_snapshot(snapshot: &LiveFileSnapshot) -> Result<(), AppError> {
+    match &snapshot.content {
+        Some(content) => {
+            crate::config::atomic_write(&snapshot.path, content)?;
+            if let Some(permissions) = &snapshot.permissions {
+                fs::set_permissions(&snapshot.path, permissions.clone())
+                    .map_err(|error| AppError::io(&snapshot.path, error))?;
+            }
+        }
+        None => match fs::remove_file(&snapshot.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::io(&snapshot.path, error)),
+        },
+    }
+    Ok(())
+}
+
+fn provider_live_file_paths(app_type: &AppType) -> Result<Vec<PathBuf>, AppError> {
+    match app_type {
+        AppType::Claude => Ok(vec![get_claude_settings_path()]),
+        AppType::ClaudeDesktop => crate::claude_desktop_config::provider_live_file_paths(),
+        AppType::Codex => Ok(vec![
+            get_codex_auth_path(),
+            get_codex_config_path(),
+            crate::codex_config::get_codex_model_catalog_path(),
+        ]),
+        AppType::Gemini => Ok(vec![
+            crate::gemini_config::get_gemini_env_path(),
+            crate::gemini_config::get_gemini_settings_path(),
+        ]),
+        AppType::GrokBuild => Ok(vec![crate::grok_config::get_grok_config_path()]),
+        AppType::OpenCode => Ok(vec![crate::opencode_config::get_opencode_config_path()]),
+        AppType::OpenClaw => Ok(vec![crate::openclaw_config::get_openclaw_config_path()]),
+        AppType::Hermes => Ok(vec![crate::hermes_config::get_hermes_config_path()]),
     }
 }
 

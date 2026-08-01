@@ -123,6 +123,64 @@ pub struct SwitchResult {
     pub warnings: Vec<String>,
 }
 
+/// Compensating state for a provider update whose side effects are applied
+/// before the provider row is committed.
+///
+/// `live_backup` is intentionally nested: `None` means this update never
+/// touched takeover backup state, while `Some(None)` records that the backup
+/// row was absent and must be deleted if a later step creates it.
+#[derive(Debug, Default)]
+struct ProviderUpdateRollbackState {
+    live_files: Option<live::LiveFilesSnapshot>,
+    live_backup: Option<Option<crate::proxy::types::LiveBackup>>,
+}
+
+impl ProviderUpdateRollbackState {
+    fn restore(&self, state: &AppState, app_type: &AppType) -> Result<(), AppError> {
+        // Side effects are prepared backup-first and live-second during
+        // takeover, so compensate in reverse order. Attempt every restoration
+        // even when an earlier one fails and return all failures together.
+        let mut failures = Vec::new();
+        if let Some(snapshot) = &self.live_files {
+            if let Err(error) = snapshot.restore() {
+                failures.push(format!("Live 文件: {error}"));
+            }
+        }
+        if let Some(snapshot) = &self.live_backup {
+            if let Err(error) = futures::executor::block_on(
+                state
+                    .db
+                    .restore_live_backup_snapshot(app_type.as_str(), snapshot.as_ref()),
+            ) {
+                failures.push(format!("Live 备份: {error}"));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(format!(
+                "恢复供应商更新前状态失败: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
+    fn rollback_error(
+        &self,
+        state: &AppState,
+        app_type: &AppType,
+        update_error: AppError,
+    ) -> AppError {
+        match self.restore(state, app_type) {
+            Ok(()) => update_error,
+            Err(rollback_error) => {
+                AppError::Message(format!("供应商更新失败: {update_error}; {rollback_error}"))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2574,9 +2632,638 @@ requires_openai_auth = true
             );
         });
     }
+
+    fn codex_provider(id: &str) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Codex {id}"),
+            codex_settings("https://example.com/v1", &format!("sk-{id}")),
+            None,
+        );
+        provider.category = Some("codex".to_string());
+        provider
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    fn claude_desktop_direct_provider(id: &str, token: &str) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Desktop {id}"),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": token,
+                    "ANTHROPIC_BASE_URL": "https://api.example.com"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    #[serial]
+    fn update_current_exclusive_partial_write_restores_raw_files_and_old_row() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("in-memory database"));
+        let state = AppState::new(db.clone());
+
+        let original = claude_desktop_direct_provider("desktop-current", "old-token");
+        db.save_provider(AppType::ClaudeDesktop.as_str(), &original)
+            .expect("seed old desktop provider");
+        db.set_current_provider(AppType::ClaudeDesktop.as_str(), &original.id)
+            .expect("seed desktop current provider");
+        crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some(&original.id))
+            .expect("seed local desktop current provider");
+
+        let paths = crate::claude_desktop_config::provider_live_file_paths()
+            .expect("resolve desktop live paths");
+        let normal_path = &paths[0];
+        let threep_path = &paths[1];
+        let profile_path = &paths[2];
+        let meta_path = &paths[3];
+        fs::create_dir_all(normal_path.parent().expect("normal config parent"))
+            .expect("create normal config parent");
+        fs::create_dir_all(threep_path.parent().expect("3p config parent"))
+            .expect("create 3p config parent");
+        let raw_normal = br#"{
+  "manualUnknown": "normal-must-survive",
+  "deploymentMode" : "1p"
+}
+"#;
+        let raw_threep = br#"{
+  "deploymentMode" : "1p",
+  "manualUnknown": { "spacing": true }
+}
+"#;
+        fs::write(normal_path, raw_normal).expect("seed raw normal config");
+        fs::write(threep_path, raw_threep).expect("seed raw 3p config");
+
+        // The writer updates normal + 3p first, then fails creating the profile
+        // below this path because the would-be directory is an ordinary file.
+        let config_library = profile_path.parent().expect("profile parent");
+        fs::write(config_library, b"not a directory").expect("block profile directory");
+
+        let mut updated = claude_desktop_direct_provider("desktop-current", "new-token");
+        updated.name = "Desktop updated".to_string();
+        ProviderService::update(&state, AppType::ClaudeDesktop, None, updated)
+            .expect_err("partial desktop live write must fail");
+
+        assert_eq!(
+            fs::read(normal_path).expect("read restored normal config"),
+            raw_normal,
+            "normal config must be restored byte-for-byte"
+        );
+        assert_eq!(
+            fs::read(threep_path).expect("read restored 3p config"),
+            raw_threep,
+            "3p config must be restored byte-for-byte"
+        );
+        assert!(
+            !profile_path.exists(),
+            "failed update must not leave a profile"
+        );
+        assert!(!meta_path.exists(), "failed update must not leave metadata");
+        let stored = db
+            .get_provider_by_id(&original.id, AppType::ClaudeDesktop.as_str())
+            .expect("read desktop provider")
+            .expect("desktop provider remains");
+        assert_eq!(stored.name, original.name);
+        assert_eq!(stored.settings_config, original.settings_config);
+    }
+
+    #[test]
+    #[serial]
+    fn update_takeover_backup_failure_keeps_old_row_and_exact_backup_without_deadlock() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("in-memory database"));
+        let state = Arc::new(AppState::new(db.clone()));
+
+        let original = Provider::with_id(
+            "claude-current".to_string(),
+            "Claude original".to_string(),
+            json!({ "env": { "ANTHROPIC_API_KEY": "old-key" } }),
+            None,
+        );
+        db.save_provider(AppType::Claude.as_str(), &original)
+            .expect("seed old Claude provider");
+        db.set_current_provider(AppType::Claude.as_str(), &original.id)
+            .expect("seed Claude current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&original.id))
+            .expect("seed local Claude current provider");
+        let old_backup_text = r#"{"sentinel":"original-backup"}"#;
+        futures::executor::block_on(db.save_live_backup(AppType::Claude.as_str(), old_backup_text))
+            .expect("seed old live backup");
+        let old_backup = futures::executor::block_on(db.get_live_backup(AppType::Claude.as_str()))
+            .expect("read old live backup")
+            .expect("old live backup exists");
+
+        // Reject only the replacement payload. Exact rollback of the old row
+        // remains allowed, including its original backed_up_at timestamp.
+        db.conn
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .execute_batch(
+                r#"
+                CREATE TRIGGER fail_claude_backup_update
+                BEFORE INSERT ON proxy_live_backup
+                WHEN NEW.app_type = 'claude'
+                  AND NEW.original_config <> '{"sentinel":"original-backup"}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced live backup failure');
+                END;
+                "#,
+            )
+            .expect("install backup failure trigger");
+
+        let mut updated = original.clone();
+        updated.name = "Claude updated".to_string();
+        updated.settings_config = json!({ "env": { "ANTHROPIC_API_KEY": "new-key" } });
+
+        // A public backup updater would recursively acquire the already-held
+        // per-app switch lock and hang. Bound completion to guard the locked
+        // `_inner` contract explicitly.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let update_state = state.clone();
+        let handle = std::thread::spawn(move || {
+            let result =
+                ProviderService::update(update_state.as_ref(), AppType::Claude, None, updated);
+            done_tx.send(result).expect("send update result");
+        });
+        let error = done_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("takeover update must not deadlock on a nested switch lock")
+            .expect_err("forced backup write must fail update");
+        handle.join().expect("join update thread");
+        assert!(error.to_string().contains("forced live backup failure"));
+
+        let stored = db
+            .get_provider_by_id(&original.id, AppType::Claude.as_str())
+            .expect("read Claude provider")
+            .expect("Claude provider remains");
+        assert_eq!(stored.name, original.name);
+        assert_eq!(stored.settings_config, original.settings_config);
+        let restored_backup =
+            futures::executor::block_on(db.get_live_backup(AppType::Claude.as_str()))
+                .expect("read restored backup")
+                .expect("backup remains present");
+        assert_eq!(restored_backup.original_config, old_backup.original_config);
+        assert_eq!(restored_backup.backed_up_at, old_backup.backed_up_at);
+    }
+
+    #[test]
+    #[serial]
+    fn update_takeover_provider_commit_failure_restores_exact_backup() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("in-memory database"));
+        let state = AppState::new(db.clone());
+
+        let original = Provider::with_id(
+            "claude-current".to_string(),
+            "Claude original".to_string(),
+            json!({ "env": { "ANTHROPIC_API_KEY": "old-key" } }),
+            None,
+        );
+        db.save_provider(AppType::Claude.as_str(), &original)
+            .expect("seed old Claude provider");
+        db.set_current_provider(AppType::Claude.as_str(), &original.id)
+            .expect("seed Claude current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&original.id))
+            .expect("seed local Claude current provider");
+        futures::executor::block_on(db.save_live_backup(
+            AppType::Claude.as_str(),
+            r#"{"sentinel":"old-before-provider-commit"}"#,
+        ))
+        .expect("seed old live backup");
+        let old_backup = futures::executor::block_on(db.get_live_backup(AppType::Claude.as_str()))
+            .expect("read old live backup")
+            .expect("old live backup exists");
+        db.conn
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .execute_batch(
+                r#"
+                CREATE TRIGGER fail_provider_commit
+                BEFORE UPDATE ON providers
+                WHEN NEW.app_type = 'claude' AND NEW.name = 'Claude updated'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced provider commit failure');
+                END;
+                "#,
+            )
+            .expect("install provider failure trigger");
+
+        let mut updated = original.clone();
+        updated.name = "Claude updated".to_string();
+        updated.settings_config = json!({ "env": { "ANTHROPIC_API_KEY": "new-key" } });
+        ProviderService::update(&state, AppType::Claude, None, updated)
+            .expect_err("provider commit must fail after backup preparation");
+
+        let stored = db
+            .get_provider_by_id(&original.id, AppType::Claude.as_str())
+            .expect("read unchanged provider")
+            .expect("provider remains");
+        assert_eq!(stored.name, original.name);
+        assert_eq!(stored.settings_config, original.settings_config);
+        let restored_backup =
+            futures::executor::block_on(db.get_live_backup(AppType::Claude.as_str()))
+                .expect("read restored backup")
+                .expect("backup remains present");
+        assert_eq!(restored_backup.original_config, old_backup.original_config);
+        assert_eq!(restored_backup.backed_up_at, old_backup.backed_up_at);
+    }
+
+    #[test]
+    #[serial]
+    fn update_additive_live_failure_keeps_old_row_and_raw_file() {
+        with_test_home(|state, _home| {
+            let mut original = opencode_provider("live-additive");
+            let mut meta = original.meta.take().unwrap_or_default();
+            meta.live_config_managed = Some(true);
+            original.meta = Some(meta);
+            state
+                .db
+                .save_provider(AppType::OpenCode.as_str(), &original)
+                .expect("seed additive provider");
+            crate::opencode_config::set_provider(&original.id, original.settings_config.clone())
+                .expect("seed additive live config");
+            let config_path = crate::opencode_config::get_opencode_config_path();
+            let raw_before = fs::read(&config_path).expect("read raw additive config");
+
+            let mut updated = original.clone();
+            updated.name = "Updated additive provider".to_string();
+            // Basic provider validation accepts an object, but the live writer
+            // deliberately rejects one without npm/options.
+            updated.settings_config = json!({ "invalid": true });
+            let error = ProviderService::update(state, AppType::OpenCode, None, updated)
+                .expect_err("invalid live fragment must fail");
+            assert!(error.to_string().contains("invalid config structure"));
+
+            let stored = state
+                .db
+                .get_provider_by_id(&original.id, AppType::OpenCode.as_str())
+                .expect("read additive provider")
+                .expect("additive provider remains");
+            assert_eq!(stored.name, original.name);
+            assert_eq!(stored.settings_config, original.settings_config);
+            assert_eq!(
+                fs::read(&config_path).expect("read restored additive config"),
+                raw_before,
+                "failed additive update must preserve exact live bytes"
+            );
+        });
+    }
+
+    fn block_codex_config_directory(home: &Path, current: Option<&str>) {
+        let blocked = home.join("blocked-codex-config-dir");
+        fs::write(&blocked, b"not a directory").expect("create blocking file");
+        let mut settings = crate::settings::get_settings();
+        settings.codex_config_dir = Some(blocked.to_string_lossy().into_owned());
+        settings.current_provider_codex = current.map(str::to_string);
+        crate::settings::update_settings(settings).expect("set blocked Codex config path");
+    }
+
+    #[test]
+    #[serial]
+    fn current_pointer_commit_rolls_back_local_on_database_failure() {
+        let _ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        crate::settings::set_current_provider(&AppType::Codex, Some("old"))
+            .expect("seed local current provider");
+        let live_rollback_called = std::cell::Cell::new(false);
+
+        ProviderService::commit_current_provider_pointers(
+            &AppType::Codex,
+            "new",
+            || {
+                Err(AppError::Database(
+                    "forced current-provider failure".to_string(),
+                ))
+            },
+            || {
+                live_rollback_called.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("database failure must fail the pointer commit");
+
+        assert!(
+            live_rollback_called.get(),
+            "pointer failure must restore the previous live provider"
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+            Some("old"),
+            "local current provider must roll back when the DB pointer commit fails"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn current_pointer_error_reports_live_rollback_failure() {
+        let _ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        crate::settings::set_current_provider(&AppType::Codex, Some("old"))
+            .expect("seed local current provider");
+
+        let error = ProviderService::commit_current_provider_pointers(
+            &AppType::Codex,
+            "new",
+            || Err(AppError::Database("pointer commit failed".to_string())),
+            || Err(AppError::Message("live rollback failed".to_string())),
+        )
+        .expect_err("both failures must be returned");
+        let message = error.to_string();
+        assert!(message.contains("pointer commit failed"));
+        assert!(message.contains("live rollback failed"));
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+            Some("old")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn first_provider_pointer_failure_restores_exact_raw_live() {
+        let _ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        let settings_path = get_claude_settings_path();
+        fs::create_dir_all(settings_path.parent().expect("Claude settings parent"))
+            .expect("create Claude settings directory");
+        let original = br#"{
+  "manualUnknown": { "spacing": "must survive" },
+  "env": { "ANTHROPIC_API_KEY": "manual-key" }
+}
+"#;
+        fs::write(&settings_path, original).expect("seed raw Claude live settings");
+        let snapshot = live::LiveFilesSnapshot::capture(&AppType::Claude)
+            .expect("snapshot Claude live settings");
+
+        let error = ProviderService::commit_first_provider_activation(
+            || crate::config::atomic_write(&settings_path, br#"{"target":true}"#),
+            || {
+                Err(AppError::Database(
+                    "forced first-provider pointer failure".to_string(),
+                ))
+            },
+            move || snapshot.restore(),
+        )
+        .expect_err("pointer failure must restore the live file");
+
+        assert!(error
+            .to_string()
+            .contains("forced first-provider pointer failure"));
+        assert_eq!(
+            fs::read(&settings_path).expect("read restored Claude settings"),
+            original,
+            "first activation rollback must restore the exact pre-switch bytes"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn switch_pointer_failure_restores_raw_codex_files_independent_of_stale_db() {
+        let _ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        crate::settings::set_current_provider(&AppType::Codex, Some("old"))
+            .expect("seed local current provider");
+
+        // The database deliberately lacks the manual/unknown live fields. A
+        // rollback reconstructed from this row would therefore be lossy.
+        let db = Database::memory().expect("in-memory database");
+        db.save_provider(AppType::Codex.as_str(), &codex_provider("old"))
+            .expect("seed stale database provider");
+        db.set_current_provider(AppType::Codex.as_str(), "old")
+            .expect("seed database current provider");
+
+        let config_path = crate::codex_config::get_codex_config_path();
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+            .expect("create Codex config directory");
+
+        let original_config = br#"# preserve this hand-written formatting
+model = "manual-model"
+unknown_key = "keep-me"
+
+[mcp_servers.manual]
+command = "manual-cli"
+"#;
+        let original_auth =
+            b"{\r\n  \"OPENAI_API_KEY\" : \"manual-key\",\r\n  \"unknown\": true\r\n}\r\n";
+        fs::write(&config_path, original_config).expect("seed raw Codex config");
+        fs::write(&auth_path, original_auth).expect("seed raw Codex auth");
+        assert!(!catalog_path.exists(), "catalog starts absent");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640))
+                .expect("set original Codex config permissions");
+        }
+
+        let snapshot = live::LiveFilesSnapshot::capture(&AppType::Codex)
+            .expect("snapshot all Codex live files");
+        crate::config::atomic_write(&config_path, b"model = \"target\"\n")
+            .expect("write target Codex config");
+        crate::config::atomic_write(&auth_path, br#"{"OPENAI_API_KEY":"target"}"#)
+            .expect("write target Codex auth");
+        crate::config::atomic_write(&catalog_path, br#"{"models":[]}"#)
+            .expect("create target model catalog");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+                .expect("change target Codex config permissions");
+        }
+
+        ProviderService::commit_current_provider_pointers(
+            &AppType::Codex,
+            "new",
+            || {
+                Err(AppError::Database(
+                    "forced current-provider failure".to_string(),
+                ))
+            },
+            move || snapshot.restore(),
+        )
+        .expect_err("database pointer failure must roll back live files");
+
+        assert_eq!(
+            fs::read(&config_path).expect("read restored Codex config"),
+            original_config,
+            "manual Codex TOML bytes must not be reconstructed from stale DB state"
+        );
+        assert_eq!(
+            fs::read(&auth_path).expect("read restored Codex auth"),
+            original_auth,
+            "manual Codex auth formatting and unknown fields must survive"
+        );
+        assert!(
+            !catalog_path.exists(),
+            "a model catalog created by the failed switch must be removed"
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            db.get_current_provider(AppType::Codex.as_str())
+                .expect("read unchanged DB pointer")
+                .as_deref(),
+            Some("old")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path)
+                    .expect("read restored Codex config metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640,
+                "snapshot rollback must restore the original permissions"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn switch_live_write_failure_keeps_both_current_pointers() {
+        let ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        block_codex_config_directory(ambient.home(), Some("old"));
+
+        let db = Arc::new(Database::memory().expect("in-memory database"));
+        let state = AppState::new(db.clone());
+        for provider in [codex_provider("old"), codex_provider("new")] {
+            db.save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed provider");
+        }
+        db.set_current_provider(AppType::Codex.as_str(), "old")
+            .expect("seed DB current provider");
+
+        ProviderService::switch(&state, AppType::Codex, "new")
+            .expect_err("blocked live path must fail the switch");
+
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            db.get_current_provider(AppType::Codex.as_str())
+                .expect("read DB current provider")
+                .as_deref(),
+            Some("old")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn first_provider_live_write_failure_does_not_mark_it_current() {
+        let ambient = crate::settings::test_support::AmbientSettings::pin("{}");
+        block_codex_config_directory(ambient.home(), None);
+
+        let db = Arc::new(Database::memory().expect("in-memory database"));
+        let state = AppState::new(db.clone());
+        ProviderService::add(&state, AppType::Codex, codex_provider("first"), true)
+            .expect_err("blocked live path must fail first-provider activation");
+
+        assert!(
+            db.get_provider_by_id("first", AppType::Codex.as_str())
+                .expect("read saved provider")
+                .is_some(),
+            "the editable provider row should remain saved"
+        );
+        assert_eq!(
+            db.get_current_provider(AppType::Codex.as_str())
+                .expect("read DB current provider"),
+            None
+        );
+        assert_eq!(crate::settings::get_current_provider(&AppType::Codex), None);
+    }
 }
 
 impl ProviderService {
+    fn commit_first_provider_activation<W, S, R>(
+        write_live: W,
+        set_database_current: S,
+        rollback_live: R,
+    ) -> Result<(), AppError>
+    where
+        W: FnOnce() -> Result<(), AppError>,
+        S: FnOnce() -> Result<(), AppError>,
+        R: FnOnce() -> Result<(), AppError>,
+    {
+        // First activation follows the same live-first contract as a normal
+        // switch. The caller snapshots the real live files before entering, so
+        // either a partial live-write failure or a later DB pointer failure can
+        // restore the exact bytes/missing-file state.
+        if let Err(live_error) = write_live() {
+            return match rollback_live() {
+                Ok(()) => Err(live_error),
+                Err(rollback_error) => Err(AppError::Message(format!(
+                    "首次激活供应商的 Live 配置写入失败: {live_error}; 恢复原 Live 文件也失败: {rollback_error}"
+                ))),
+            };
+        }
+
+        let Err(pointer_error) = set_database_current() else {
+            return Ok(());
+        };
+        match rollback_live() {
+            Ok(()) => Err(pointer_error),
+            Err(rollback_error) => Err(AppError::Message(format!(
+                "首次激活供应商的数据库当前指针提交失败: {pointer_error}; 恢复原 Live 文件也失败: {rollback_error}"
+            ))),
+        }
+    }
+
+    fn commit_current_provider_pointers<F, R>(
+        app_type: &AppType,
+        id: &str,
+        set_database_current: F,
+        rollback_live: R,
+    ) -> Result<(), AppError>
+    where
+        F: FnOnce() -> Result<(), AppError>,
+        R: FnOnce() -> Result<(), AppError>,
+    {
+        let previous_local = crate::settings::get_current_provider(app_type);
+        let pointer_result = match crate::settings::set_current_provider(app_type, Some(id)) {
+            Err(error) => Err(error),
+            Ok(()) => match set_database_current() {
+                Ok(()) => Ok(()),
+                Err(database_error) => {
+                    if let Err(rollback_error) =
+                        crate::settings::set_current_provider(app_type, previous_local.as_deref())
+                    {
+                        Err(AppError::Message(format!(
+                        "更新数据库当前供应商失败: {database_error}; 回滚本地当前供应商也失败: {rollback_error}"
+                        )))
+                    } else {
+                        Err(database_error)
+                    }
+                }
+            },
+        };
+
+        let Err(pointer_error) = pointer_result else {
+            return Ok(());
+        };
+        match rollback_live() {
+            Ok(()) => Err(pointer_error),
+            Err(live_rollback_error) => Err(AppError::Message(format!(
+                "提交当前供应商指针失败: {pointer_error}; 恢复切换前 Live 配置也失败: {live_rollback_error}"
+            ))),
+        }
+    }
+
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
         if matches!(app_type, AppType::Claude) {
             let mut v = provider.settings_config.clone();
@@ -2741,14 +3428,26 @@ impl ProviderService {
             return Ok(true);
         }
 
+        // First activation mutates the same exclusive live files and pointer
+        // state as an ordinary switch. Serialize the whole current-check /
+        // snapshot / live-write / pointer-commit sequence so concurrent adds,
+        // switches, or takeover transitions cannot interleave it.
+        let _switch_guard =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
+
         // For other apps: Check if sync is needed (if this is current provider, or no current provider)
         let current = state.db.get_current_provider(app_type.as_str())?;
         if current.is_none() {
-            // No current provider, set as current and sync
-            state
-                .db
-                .set_current_provider(app_type.as_str(), &provider.id)?;
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            let live_snapshot = live::LiveFilesSnapshot::capture(&app_type)?;
+            Self::commit_first_provider_activation(
+                || write_live_with_common_config(state.db.as_ref(), &app_type, &provider),
+                || {
+                    state
+                        .db
+                        .set_current_provider(app_type.as_str(), &provider.id)
+                },
+                move || live_snapshot.restore(),
+            )?;
         }
 
         Ok(true)
@@ -2764,6 +3463,19 @@ impl ProviderService {
         let mut provider = provider;
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let provider_id_changed = original_id != provider.id;
+
+        // Exclusive updates share files and takeover backup state with switch /
+        // takeover transitions. Hold the same per-app lock from the first state
+        // read through the final provider-row commit. Additive OMO updates keep
+        // their existing dedicated transaction below.
+        let _update_guard = if app_type.is_additive_mode() {
+            None
+        } else {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        };
+
         let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
@@ -2892,63 +3604,89 @@ impl ProviderService {
             )?;
             Self::set_provider_live_config_managed(&mut provider, live_config_managed);
 
-            // Save to database after live-config presence is resolved so parse errors
-            // do not report failure after already mutating DB state.
-            state.db.save_provider(app_type.as_str(), &provider)?;
-
             if !live_config_managed {
+                // DB-only providers intentionally have no live side effect.
+                state.db.save_provider(app_type.as_str(), &provider)?;
                 return Ok(true);
             }
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+
+            let rollback = ProviderUpdateRollbackState {
+                live_files: Some(live::LiveFilesSnapshot::capture(&app_type)?),
+                ..Default::default()
+            };
+            if let Err(error) =
+                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)
+            {
+                return Err(rollback.rollback_error(state, &app_type, error));
+            }
+            if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+                return Err(rollback.rollback_error(state, &app_type, error));
+            }
             return Ok(true);
         }
 
-        // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
-
-        // For other apps: Check if this is current provider (use effective current, not just DB)
+        // Determine whether live is in scope before mutating the provider row.
+        // Non-current providers remain a DB-only update.
         let effective_current =
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
-        if is_current {
-            // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
-            // - 不直接走普通 Live 写入逻辑
-            // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
-            let has_live_backup =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            // Backup or live placeholders mean the live file is currently owned
-            // by proxy takeover, including the short activation window before
-            // proxy_config.enabled is committed.
-            let should_sync_via_proxy = has_live_backup || live_taken_over;
+        if !is_current {
+            state.db.save_provider(app_type.as_str(), &provider)?;
+            return Ok(true);
+        }
 
-            if should_sync_via_proxy {
+        // Capture takeover backup state before any backup/live mutation. A
+        // missing row is meaningful rollback state, not the absence of a
+        // snapshot. Read errors abort before touching either side.
+        let previous_live_backup =
+            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))?;
+        let has_live_backup = previous_live_backup.is_some();
+        let live_taken_over = state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(&app_type);
+        // Backup or live placeholders mean the live file is currently owned by
+        // proxy takeover, including the short activation window before
+        // proxy_config.enabled is committed.
+        let should_sync_via_proxy = has_live_backup || live_taken_over;
+
+        if should_sync_via_proxy {
+            let proxy_running = futures::executor::block_on(state.proxy_service.is_running());
+            let writes_active_live = matches!(app_type, AppType::ClaudeDesktop)
+                || (proxy_running
+                    && (matches!(app_type, AppType::Claude)
+                        || (live_taken_over && matches!(app_type, AppType::Codex))));
+            let rollback = ProviderUpdateRollbackState {
+                live_files: writes_active_live
+                    .then(|| live::LiveFilesSnapshot::capture(&app_type))
+                    .transpose()?,
+                live_backup: Some(previous_live_backup),
+            };
+
+            // The outer update already owns the per-app switch lock. Call the
+            // explicit locked variant to avoid recursively acquiring the same
+            // non-reentrant lock.
+            let prepare_result = (|| -> Result<(), AppError> {
                 if matches!(app_type, AppType::ClaudeDesktop) {
                     write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
                 } else {
                     futures::executor::block_on(
                         state
                             .proxy_service
-                            .update_live_backup_from_provider(app_type.as_str(), &provider),
+                            .update_live_backup_from_provider_inner(app_type.as_str(), &provider),
                     )
-                    .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+                    .map_err(|error| AppError::Message(format!("更新 Live 备份失败: {error}")))?;
                 }
 
-                if futures::executor::block_on(state.proxy_service.is_running()) {
+                if proxy_running {
                     if matches!(app_type, AppType::Claude) {
                         futures::executor::block_on(
                             state
                                 .proxy_service
                                 .sync_claude_live_from_provider_while_proxy_active(&provider),
                         )
-                        .map_err(|e| {
-                            AppError::Message(format!("同步 Claude Live 配置失败: {e}"))
+                        .map_err(|error| {
+                            AppError::Message(format!("同步 Claude Live 配置失败: {error}"))
                         })?;
                     } else if live_taken_over && matches!(app_type, AppType::Codex) {
                         // Codex model mappings are projected into a generated
@@ -2960,30 +3698,48 @@ impl ProviderService {
                                 .proxy_service
                                 .sync_codex_live_from_provider_while_proxy_active(&provider),
                         )
-                        .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
+                        .map_err(|error| {
+                            AppError::Message(format!("同步 Codex Live 配置失败: {error}"))
+                        })?;
                     }
                 }
-            } else {
-                // 整体重写 live 前先把 Codex / Grok Build 用户在 [mcp_servers]
-                // 里的手工编辑回填进 DB（warn-degrade，详见
-                // McpService::backfill_live_edits_for_app）。
-                if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
-                    if let Err(err) = McpService::backfill_live_edits_for_app(state, &app_type) {
-                        log::warn!("保存供应商前回填 {app_type:?} 的 MCP 编辑失败: {err}");
-                    }
-                }
-                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                // 重写 live 后只重投影本应用的 MCP：全量 sync_all_enabled 会把
-                // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）牵连进保存
-                // 流程。走到这里 DB 与 live 都已按新配置落盘，保存事实上已
-                // 成功；投影失败降级为警告，避免制造"保存失败"假象（MCP
-                // 投影可自愈：下次切换 / 任一 MCP 启停都会重新投影）。
-                if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
-                    log::warn!(
-                        "保存供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}"
-                    );
-                }
+                Ok(())
+            })();
+
+            if let Err(error) = prepare_result {
+                return Err(rollback.rollback_error(state, &app_type, error));
             }
+            if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+                return Err(rollback.rollback_error(state, &app_type, error));
+            }
+            return Ok(true);
+        }
+
+        // Whole-file Codex/Grok rewrites follow a live-first transaction. MCP
+        // backfill is warn-only and happens before the raw snapshot so any
+        // later failure can still restore exactly what was on disk immediately
+        // before the first provider-owned write.
+        if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
+            if let Err(err) = McpService::backfill_live_edits_for_app(state, &app_type) {
+                log::warn!("保存供应商前回填 {app_type:?} 的 MCP 编辑失败: {err}");
+            }
+        }
+        let rollback = ProviderUpdateRollbackState {
+            live_files: Some(live::LiveFilesSnapshot::capture(&app_type)?),
+            ..Default::default()
+        };
+        if let Err(error) = write_live_with_common_config(state.db.as_ref(), &app_type, &provider) {
+            return Err(rollback.rollback_error(state, &app_type, error));
+        }
+        if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+            return Err(rollback.rollback_error(state, &app_type, error));
+        }
+
+        // DB and live are now committed. MCP projection is repairable and
+        // remains warn-only so it cannot turn a completed provider save into a
+        // false failure report.
+        if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
+            log::warn!("保存供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}");
         }
 
         Ok(true)
@@ -3124,9 +3880,9 @@ impl ProviderService {
     /// 3. If takeover mode active: hot-switch proxy target and refresh proxy-safe Live labels
     /// 4. If normal mode:
     ///    a. **Backfill mechanism**: Backfill current live config to current provider
-    ///    b. Update local settings current_provider_xxx (device-level)
-    ///    c. Update database is_current (as default for new devices)
-    ///    d. Write target provider config to live files
+    ///    b. Write target provider config to live files
+    ///    c. Commit local settings and database current-provider pointers
+    ///    d. Restore the exact pre-switch live file snapshot if pointer commit fails
     ///    e. Sync MCP configuration
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
         // Check if provider exists
@@ -3148,6 +3904,9 @@ impl ProviderService {
         }
 
         if matches!(app_type, AppType::ClaudeDesktop) {
+            let _switch_guard = futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            );
             return Self::switch_normal(state, app_type, id, &providers);
         }
 
@@ -3256,7 +4015,7 @@ impl ProviderService {
         let current_id = crate::settings::get_effective_current_provider(&state.db, &app_type)?;
 
         let mut backfill_completed = false;
-        if let Some(current_id) = current_id {
+        if let Some(current_id) = current_id.as_deref() {
             if current_id != id {
                 // Additive mode apps - all providers coexist in the same file,
                 // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini).
@@ -3276,14 +4035,13 @@ impl ProviderService {
                                 Self::fan_out_fresh_codex_oauth_to_providers(
                                     state,
                                     providers,
-                                    &current_id,
+                                    current_id,
                                     &live_config,
                                     &mut result,
                                 );
                             }
 
-                            if let Some(mut current_provider) = providers.get(&current_id).cloned()
-                            {
+                            if let Some(mut current_provider) = providers.get(current_id).cloned() {
                                 // 切走前先把 live 里的可共享改动（含用户直接在应用内
                                 // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
                                 // 详见 sync_common_config_snippet_from_live 的文档。
@@ -3331,15 +4089,6 @@ impl ProviderService {
             }
         }
 
-        // Additive mode apps skip setting is_current (no such concept)
-        if !app_type.is_additive_mode() {
-            // Update local settings (device-level, takes priority)
-            crate::settings::set_current_provider(&app_type, Some(id))?;
-
-            // Update database is_current (as default for new devices)
-            state.db.set_current_provider(app_type.as_str(), id)?;
-        }
-
         // Codex / Grok Build 的 [mcp_servers] 与 live 同文件：下面的整文件重写
         // + DB 重投影会覆盖用户直接在 live 里做的 MCP 手工编辑。写入前先把
         // live 编辑回填进 DB（MCP SSOT，live 优先），随后的重投影就会把新值
@@ -3355,8 +4104,45 @@ impl ProviderService {
             }
         }
 
-        // Sync to live (write_gemini_live handles security flag internally for Gemini)
-        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+        // Capture raw bytes immediately before the first live write. DB/provider
+        // reconstruction is not a valid rollback source because live may contain
+        // newer manual edits or unknown fields that backfill could not persist.
+        let live_snapshot = if app_type.is_additive_mode() {
+            None
+        } else {
+            Some(live::LiveFilesSnapshot::capture(&app_type)?)
+        };
+
+        // Sync to live (write_gemini_live handles security flag internally for Gemini).
+        // A multi-file writer can fail after changing an earlier file, so use the
+        // same snapshot for write failure as well as later pointer failure.
+        if let Err(write_error) =
+            write_live_with_common_config(state.db.as_ref(), &app_type, provider)
+        {
+            return match live_snapshot.as_ref() {
+                Some(snapshot) => match snapshot.restore() {
+                    Ok(()) => Err(write_error),
+                    Err(rollback_error) => Err(AppError::Message(format!(
+                        "写入目标供应商 Live 配置失败: {write_error}; 恢复切换前 Live 文件也失败: {rollback_error}"
+                    ))),
+                },
+                None => Err(write_error),
+            };
+        }
+
+        // Commit the current-provider pointers only after the target live
+        // configuration is durable. Otherwise a failed write leaves routing
+        // pointed at a provider whose config never became active.
+        if !app_type.is_additive_mode() {
+            let live_snapshot =
+                live_snapshot.expect("exclusive provider switch must capture a live file snapshot");
+            Self::commit_current_provider_pointers(
+                &app_type,
+                id,
+                || state.db.set_current_provider(app_type.as_str(), id),
+                move || live_snapshot.restore(),
+            )?;
+        }
 
         // A material-less official Codex provider gets a config-only live
         // write, which can leave the previous third-party key in
@@ -3460,12 +4246,13 @@ impl ProviderService {
     /// refresh tokens forever — which then get written back over live on the
     /// next switch-in.
     ///
-    /// Gates (see `merge_fresher_live_codex_oauth`): the STORED row must be
-    /// OAuth-shaped (API-key rows and empty-auth official rows are skipped, so
-    /// tokens never leak into rows that deliberately hold none), the
-    /// `tokens.account_id` must match (or be absent on both sides), and live
-    /// `last_refresh` must be at least as fresh. `tokens` is replaced
-    /// wholesale together with `last_refresh` / `auth_mode`.
+    /// Gates (see `merge_fresher_live_codex_oauth_for_fan_out`): the STORED row
+    /// must be OAuth-shaped (API-key rows and empty-auth official rows are
+    /// skipped, so tokens never leak into rows that deliberately hold none),
+    /// and both sides must carry the same non-empty `tokens.account_id`.
+    /// Missing identity is not enough to authorize a cross-row credential
+    /// copy. Live `last_refresh` must also be at least as fresh. `tokens` is
+    /// replaced wholesale together with `last_refresh` / `auth_mode`.
     ///
     /// Warn-only: a failed save pushes a warning and never blocks the switch.
     /// The outgoing provider (`skip_id`) is excluded — it receives the full
@@ -3491,9 +4278,10 @@ impl ProviderService {
             let Some(stored_auth) = provider.settings_config.get("auth") else {
                 continue;
             };
-            let Some(merged) =
-                crate::codex_config::merge_fresher_live_codex_oauth(stored_auth, live_auth)
-            else {
+            let Some(merged) = crate::codex_config::merge_fresher_live_codex_oauth_for_fan_out(
+                stored_auth,
+                live_auth,
+            ) else {
                 continue;
             };
             if merged == *stored_auth {

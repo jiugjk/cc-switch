@@ -206,6 +206,75 @@ pub fn get_current_proxy_url() -> Option<String> {
         .and_then(|url| url.clone())
 }
 
+/// Whether reqwest's implicit proxy discovery may affect outbound routing.
+///
+/// The raw-hyper transport cannot safely reproduce environment/OS proxy selection (including
+/// NO_PROXY/PAC decisions). Callers use this signal to fall back to the shared reqwest client
+/// instead of silently establishing a direct connection.
+pub(crate) fn implicit_proxy_may_be_configured() -> bool {
+    const KEYS: [&str; 6] = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+
+    if KEYS
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.as_os_str().is_empty()))
+    {
+        return true;
+    }
+
+    os_system_proxy_may_be_configured()
+}
+
+#[cfg(windows)]
+fn os_system_proxy_may_be_configured() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(settings) =
+        hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+    else {
+        return false;
+    };
+
+    let proxy_enabled = settings
+        .get_value::<u32, _>("ProxyEnable")
+        .ok()
+        .is_some_and(|value| value != 0);
+    let proxy_server_present = settings
+        .get_value::<String, _>("ProxyServer")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    let pac_present = settings
+        .get_value::<String, _>("AutoConfigURL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+
+    (proxy_enabled && proxy_server_present) || pac_present
+}
+
+#[cfg(target_os = "macos")]
+fn os_system_proxy_may_be_configured() -> bool {
+    // reqwest's default `system-proxy` feature delegates to macOS SystemConfiguration.
+    // Without adding the same platform integration to the exact-case raw transport, use
+    // reqwest conservatively so a PAC/system proxy is not silently bypassed.
+    true
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn os_system_proxy_may_be_configured() -> bool {
+    // On these targets reqwest's system matcher has no OS proxy backend; it reads the same
+    // HTTP(S)/ALL_PROXY environment variables already checked above. Returning true here would
+    // make exact-header-case direct transport permanently unreachable even with no proxy.
+    false
+}
+
 /// 检查是否正在使用代理
 #[allow(dead_code)]
 pub fn is_proxy_enabled() -> bool {
@@ -491,6 +560,40 @@ mod tests {
     fn test_build_client_direct() {
         let result = build_client(None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    fn no_proxy_environment_keeps_exact_case_direct_transport_reachable() {
+        let _guard = env_lock().lock().unwrap();
+        let keys = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ];
+        let previous = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect::<Vec<_>>();
+        for key in keys {
+            std::env::remove_var(key);
+        }
+
+        let implicit_proxy = implicit_proxy_may_be_configured();
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert!(
+            !implicit_proxy,
+            "without env or OS proxy discovery, callers must be allowed to choose raw direct transport"
+        );
     }
 
     #[test]

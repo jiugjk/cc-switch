@@ -2,7 +2,7 @@
 //!
 //! Handles importing provider configurations via ccswitch:// URLs.
 
-use super::utils::{decode_base64_param, infer_homepage_from_endpoint};
+use super::utils::{decode_base64_param, infer_homepage_from_endpoint, validate_url};
 use super::DeepLinkImportRequest;
 use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider, ProviderMeta, UsageScript};
@@ -34,6 +34,9 @@ pub fn import_provider_from_deeplink(
 
     // Step 1: Merge config file if provided (v3.8+)
     let mut merged_request = parse_and_merge_config(&request)?;
+    // Parser-level URL checks only see query parameters. Values filled from the base64 config
+    // must pass the same scheme validation before they are persisted or used by the proxy.
+    validate_merged_provider_urls(&merged_request)?;
 
     // Extract required fields (now as Option)
     let app_str = merged_request
@@ -137,6 +140,25 @@ pub fn import_provider_from_deeplink(
     }
 
     Ok(provider_id)
+}
+
+fn validate_merged_provider_urls(request: &DeepLinkImportRequest) -> Result<(), AppError> {
+    if let Some(homepage) = request
+        .homepage
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        validate_url(homepage, "homepage")?;
+    }
+    if let Some(endpoints) = request.endpoint.as_deref() {
+        for (index, endpoint) in endpoints.split(',').enumerate() {
+            let endpoint = endpoint.trim();
+            if !endpoint.is_empty() {
+                validate_url(endpoint, &format!("endpoint[{index}]"))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build a Provider structure from a deep link request
@@ -957,6 +979,7 @@ fn extract_codex_base_url(toml_value: &toml::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::prelude::*;
 
     fn hermes_request() -> DeepLinkImportRequest {
         DeepLinkImportRequest {
@@ -968,6 +991,32 @@ mod tests {
             model: Some("anthropic/claude-opus-4-8".to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn config_derived_endpoint_cannot_bypass_http_scheme_validation() {
+        let config = BASE64_STANDARD.encode(
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-test",
+                    "ANTHROPIC_BASE_URL": "file:///tmp/secret"
+                }
+            })
+            .to_string(),
+        );
+        let request = DeepLinkImportRequest {
+            resource: "provider".to_string(),
+            app: Some("claude".to_string()),
+            name: Some("Unsafe".to_string()),
+            config: Some(config),
+            ..Default::default()
+        };
+
+        let merged = parse_and_merge_config(&request).expect("config should parse");
+        assert_eq!(merged.endpoint.as_deref(), Some("file:///tmp/secret"));
+        let error = validate_merged_provider_urls(&merged)
+            .expect_err("config-derived non-HTTP endpoint must be rejected");
+        assert!(error.to_string().contains("must be http or https"));
     }
 
     /// deeplink 同时声明 `api_key` 与 `env_key` 时，导入结果只保留用户可见的

@@ -124,8 +124,8 @@ export async function readGrokGlobalConfig(): Promise<GrokGlobalConfig> {
   return invoke<GrokGlobalConfig>("read_grok_global_config");
 }
 
-export async function writeGrokGlobalConfig(content: string): Promise<void> {
-  return invoke("write_grok_global_config", { content });
+export async function writeGrokGlobalConfig(content: string): Promise<string> {
+  return invoke<string>("write_grok_global_config", { content });
 }
 
 export async function mergeGrokProfileIntoGlobalConfig(

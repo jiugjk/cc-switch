@@ -164,19 +164,17 @@ export function McpConfirmation({
         </div>
       )}
 
-      {/*
-        无条件显示，不看 `request.enabled`。
-        MCP 导入路径**根本不读这个字段**——`deeplink/mcp.rs` 里全文没有它，
-        而 `:196` 是无条件的 `merged.set_enabled_for(&app, true)`。
-        （prompt.rs / skill.rs / provider.rs 各自读了 `request.enabled`，唯独 MCP 没有，
-        所以很容易误以为这里也生效。）
-        挂条件的后果是：恶意链接省略 `enabled` 就能让这条警告消失，而写入行为
-        一模一样——把提示变成了可被攻击者关掉的开关。
-      */}
-      <div className="text-yellow-600 dark:text-yellow-500 text-sm flex items-center gap-2">
-        <span>⚠️</span>
-        <span>{t("deeplink.mcp.enabledWarning")}</span>
-      </div>
+      {request.enabled === true && (
+        <div className="text-yellow-600 dark:text-yellow-500 text-sm flex items-center gap-2">
+          <span>⚠️</span>
+          <span>{t("deeplink.mcp.enabledWarning")}</span>
+        </div>
+      )}
+      {request.enabled !== true && (
+        <div className="text-muted-foreground text-sm">
+          {t("deeplink.mcp.disabledNotice")}
+        </div>
+      )}
     </div>
   );
 }

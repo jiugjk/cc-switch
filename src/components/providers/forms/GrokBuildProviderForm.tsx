@@ -188,6 +188,70 @@ export function GrokBuildProviderForm({
   const { isSubmitting } = form.formState;
   const websiteUrl = form.watch("websiteUrl") ?? "";
 
+  // The edit dialog first renders the database snapshot, then replaces it with
+  // the asynchronously read live snapshot for the active provider. React state
+  // and react-hook-form defaults are mount-only, so explicitly reset every
+  // derived field when that initial snapshot changes. Without this, Apply
+  // Profile and Save keep submitting the stale database config shown at mount.
+  useEffect(() => {
+    const nextRawConfig =
+      initialConfigText ?? buildGrokBuildConfig(initialConfig);
+    setSelectedPresetId(initialData ? null : "custom");
+    setCategory(initialData?.category ?? "custom");
+    setIsPartner(initialData?.meta?.isPartner ?? false);
+    setPartnerPromotionKey(undefined);
+    setProfile(initialConfig.model);
+    setUpstreamModel(initialConfig.upstreamModel ?? initialConfig.model);
+    setBaseUrl(initialConfig.baseUrl);
+    setApiKey(initialConfig.apiKey);
+    setApiBackend(initialConfig.apiBackend);
+    setContextWindow(String(initialConfig.contextWindow));
+    setRawConfig(nextRawConfig);
+    setApiFormat(
+      (initialData?.meta?.apiFormat as CodexApiFormat | undefined) ??
+        "openai_responses",
+    );
+    setAnthropicAuthField(
+      initialData?.meta?.apiKeyField ?? "ANTHROPIC_AUTH_TOKEN",
+    );
+    setImpersonateClaudeCode(initialData?.meta?.impersonateClaudeCode === true);
+    setMaxOutputTokens(
+      initialData?.meta?.maxOutputTokens
+        ? String(initialData.meta.maxOutputTokens)
+        : "",
+    );
+    setCodexChatReasoning(initialData?.meta?.codexChatReasoning ?? {});
+    setPromptCacheRouting(initialData?.meta?.promptCacheRouting ?? "auto");
+    setIsFullUrl(initialData?.meta?.isFullUrl ?? false);
+    setCustomUserAgent(initialData?.meta?.customUserAgent ?? "");
+    setHeadersOverride(
+      formatRequestOverrideObject(
+        initialData?.meta?.localProxyRequestOverrides?.headers,
+      ),
+    );
+    setBodyOverride(
+      formatRequestOverrideObject(
+        initialData?.meta?.localProxyRequestOverrides?.body,
+      ),
+    );
+    setEndpointAutoSelect(initialData?.meta?.endpointAutoSelect ?? true);
+    setPresetEndpoints([]);
+    setDraftCustomEndpoints([]);
+    form.reset({
+      name: initialData?.name ?? initialConfig.name,
+      websiteUrl: initialData?.websiteUrl ?? "",
+      notes: initialData?.notes ?? "",
+      settingsConfig: JSON.stringify({ config: nextRawConfig }),
+      icon:
+        resolveProviderIcon(
+          "grokbuild",
+          initialData?.icon,
+          initialData?.iconColor,
+        ) ?? "",
+      iconColor: initialData?.iconColor ?? "",
+    });
+  }, [form, initialConfig, initialConfigText, initialData]);
+
   useEffect(() => {
     onSubmittingChange?.(isSubmitting);
   }, [isSubmitting, onSubmittingChange]);

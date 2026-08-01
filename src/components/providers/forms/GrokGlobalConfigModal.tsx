@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -37,8 +37,14 @@ export function GrokGlobalConfigModal({
   const [source, setSource] = useState("");
   const [backups, setBackups] = useState<GrokConfigBackup[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [hasLoadedConfig, setHasLoadedConfig] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const documentVersionRef = useRef(0);
+  const previewRequestRef = useRef(0);
   const isDirty = content !== savedContent;
+  const isBusy = isSaving || isPreviewing || isRestoring;
 
   const loadBackups = useCallback(async () => {
     setBackups(await configApi.listGrokConfigBackups());
@@ -47,27 +53,47 @@ export function GrokGlobalConfigModal({
   useEffect(() => {
     if (!open) return;
     let active = true;
+    documentVersionRef.current += 1;
+    previewRequestRef.current += 1;
+    setIsPreviewing(false);
     setIsLoading(true);
-    Promise.all([
-      configApi.readGrokGlobalConfig(),
-      configApi.listGrokConfigBackups(),
-    ])
-      .then(([config, nextBackups]) => {
+    setHasLoadedConfig(false);
+    void configApi
+      .readGrokGlobalConfig()
+      .then((config) => {
         if (!active) return;
+        documentVersionRef.current += 1;
+        previewRequestRef.current += 1;
+        setIsPreviewing(false);
         setContent(config.content);
         setSavedContent(config.content);
         setPath(config.path);
         setSource(config.source);
-        setBackups(nextBackups);
+        setHasLoadedConfig(true);
       })
       .catch((error) => toast.error(errorText(error)))
       .finally(() => active && setIsLoading(false));
+    void configApi
+      .listGrokConfigBackups()
+      .then((nextBackups) => active && setBackups(nextBackups))
+      .catch((error) => toast.error(errorText(error)));
     return () => {
       active = false;
+      previewRequestRef.current += 1;
     };
   }, [open]);
 
+  const updateDraft = (nextContent: string) => {
+    documentVersionRef.current += 1;
+    previewRequestRef.current += 1;
+    setIsPreviewing(false);
+    setContent(nextContent);
+  };
+
   const requestOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen && isBusy) {
+      return;
+    }
     if (
       !nextOpen &&
       isDirty &&
@@ -83,10 +109,16 @@ export function GrokGlobalConfigModal({
   };
 
   const save = async () => {
+    const documentVersion = documentVersionRef.current;
     setIsSaving(true);
     try {
-      await configApi.writeGrokGlobalConfig(content);
-      setSavedContent(content);
+      const saved = await configApi.writeGrokGlobalConfig(content);
+      if (documentVersion === documentVersionRef.current) {
+        documentVersionRef.current += 1;
+        previewRequestRef.current += 1;
+        setContent(saved);
+      }
+      setSavedContent(saved);
       await loadBackups();
       toast.success(
         t("grokBuild.globalSaveSuccess", {
@@ -101,8 +133,20 @@ export function GrokGlobalConfigModal({
   };
 
   const applyPrivacyDraft = async () => {
+    const requestId = ++previewRequestRef.current;
+    const documentVersion = documentVersionRef.current;
+    const draft = content;
+    setIsPreviewing(true);
     try {
-      setContent(await configApi.previewGrokPrivacyProtection(content));
+      const preview = await configApi.previewGrokPrivacyProtection(draft);
+      if (
+        requestId !== previewRequestRef.current ||
+        documentVersion !== documentVersionRef.current
+      ) {
+        return;
+      }
+      documentVersionRef.current += 1;
+      setContent(preview);
       toast.info(
         t("grokBuild.privacyDrafted", {
           defaultValue:
@@ -110,7 +154,13 @@ export function GrokGlobalConfigModal({
         }),
       );
     } catch (error) {
-      toast.error(errorText(error));
+      if (requestId === previewRequestRef.current) {
+        toast.error(errorText(error));
+      }
+    } finally {
+      if (requestId === previewRequestRef.current) {
+        setIsPreviewing(false);
+      }
     }
   };
 
@@ -126,9 +176,15 @@ export function GrokGlobalConfigModal({
     ) {
       return;
     }
+    const documentVersion = documentVersionRef.current;
+    setIsRestoring(true);
     try {
       const restored = await configApi.restoreGrokConfigBackup(backup.filename);
-      setContent(restored);
+      if (documentVersion === documentVersionRef.current) {
+        documentVersionRef.current += 1;
+        previewRequestRef.current += 1;
+        setContent(restored);
+      }
       setSavedContent(restored);
       await loadBackups();
       toast.success(
@@ -136,6 +192,8 @@ export function GrokGlobalConfigModal({
       );
     } catch (error) {
       toast.error(errorText(error));
+    } finally {
+      setIsRestoring(false);
     }
   };
 
@@ -194,7 +252,7 @@ export function GrokGlobalConfigModal({
           ) : (
             <JsonEditor
               value={content}
-              onChange={setContent}
+              onChange={updateDraft}
               darkMode={isDarkMode}
               height={400}
               showValidation={false}
@@ -243,6 +301,7 @@ export function GrokGlobalConfigModal({
                         type="button"
                         size="sm"
                         variant="ghost"
+                        disabled={isLoading || isBusy}
                         onClick={() => restoreBackup(backup)}
                       >
                         <RotateCcw className="mr-1 h-3.5 w-3.5" />
@@ -252,6 +311,7 @@ export function GrokGlobalConfigModal({
                         type="button"
                         size="sm"
                         variant="ghost"
+                        disabled={isLoading || isBusy}
                         aria-label={t("grokBuild.deleteBackup", {
                           defaultValue: "Delete backup",
                         })}
@@ -268,7 +328,12 @@ export function GrokGlobalConfigModal({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={applyPrivacyDraft}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={isLoading || !hasLoadedConfig || isBusy}
+            onClick={applyPrivacyDraft}
+          >
             <ShieldCheck className="mr-2 h-4 w-4" />
             {t("grokBuild.privacyDraft", {
               defaultValue: "Add privacy settings to draft",
@@ -277,13 +342,14 @@ export function GrokGlobalConfigModal({
           <Button
             type="button"
             variant="outline"
+            disabled={isBusy}
             onClick={() => requestOpenChange(false)}
           >
             {t("common.cancel")}
           </Button>
           <Button
             type="button"
-            disabled={isLoading || isSaving || !isDirty}
+            disabled={isLoading || !hasLoadedConfig || isBusy || !isDirty}
             onClick={save}
           >
             {isSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

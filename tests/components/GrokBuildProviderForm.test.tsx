@@ -230,4 +230,85 @@ context_window = 250000
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit.mock.calls[0][0].meta.custom_endpoints).toBeUndefined();
   });
+
+  it("resets edit fields when an asynchronous live snapshot replaces initialData", async () => {
+    const config = (
+      profile: string,
+      baseUrl: string,
+      apiKey: string,
+    ) => `[models]
+default = "${profile}"
+
+[model."${profile}"]
+model = "${profile}-upstream"
+base_url = "${baseUrl}"
+name = "${profile} relay"
+api_key = "${apiKey}"
+api_backend = "responses"
+context_window = 250000
+`;
+    const databaseConfig = config(
+      "database-profile",
+      "https://database.example/v1",
+      "database-key",
+    );
+    const liveConfig = config(
+      "live-profile",
+      "https://live.example/v1",
+      "live-key",
+    );
+    const { container, rerender } = render(
+      <GrokBuildProviderForm
+        providerId="existing-provider"
+        submitLabel="Save"
+        onSubmit={vi.fn()}
+        onCancel={() => {}}
+        initialData={{
+          name: "Database Relay",
+          settingsConfig: { config: databaseConfig },
+        }}
+      />,
+    );
+
+    expect(
+      container.querySelector<HTMLInputElement>("#codexBaseUrl")?.value,
+    ).toBe("https://database.example/v1");
+
+    rerender(
+      <GrokBuildProviderForm
+        providerId="existing-provider"
+        submitLabel="Save"
+        onSubmit={vi.fn()}
+        onCancel={() => {}}
+        initialData={{
+          name: "Live Relay",
+          settingsConfig: { config: liveConfig },
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        container.querySelector<HTMLInputElement>("#grokbuild-profile")?.value,
+      ).toBe("live-profile");
+      expect(
+        container.querySelector<HTMLInputElement>("#codexBaseUrl")?.value,
+      ).toBe("https://live.example/v1");
+      expect(screen.getByLabelText("raw-config")).toHaveValue(liveConfig);
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Apply profile to live config" }),
+    );
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "merge_grok_profile_into_global_config",
+        expect.objectContaining({
+          profileContent: expect.stringContaining(
+            'base_url = "https://live.example/v1"',
+          ),
+        }),
+      ),
+    );
+  });
 });

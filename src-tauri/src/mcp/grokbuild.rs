@@ -139,6 +139,17 @@ pub fn grokbuild_specs_equivalent(db_spec: &Value, live_spec: &Value) -> bool {
     }
 }
 
+/// Grok Build counterpart of `merge_codex_live_spec`: replace fields visible in Grok's TOML
+/// dialect while retaining shared extension data that the lossy projection cannot encode.
+pub(crate) fn merge_grokbuild_live_spec(db_spec: &Value, live_spec: &Value) -> Value {
+    super::merge_lossy_live_spec(
+        db_spec,
+        live_spec,
+        canonicalize_grokbuild_spec_for_compare(db_spec),
+        &["http_headers"],
+    )
+}
+
 pub fn import_from_grokbuild(config: &mut MultiAppConfig) -> Result<usize, AppError> {
     let live_specs = collect_live_grokbuild_server_specs()?;
     if live_specs.is_empty() {
@@ -234,8 +245,9 @@ pub fn remove_server_from_grokbuild(id: &str) -> Result<(), AppError> {
     let mut doc = match text.parse::<toml_edit::DocumentMut>() {
         Ok(doc) => doc,
         Err(error) => {
-            log::warn!("解析 Grok Build config.toml 失败: {error}，跳过删除操作");
-            return Ok(());
+            return Err(AppError::McpValidation(format!(
+                "解析 Grok Build config.toml 失败，无法安全删除 MCP 服务器 '{id}': {error}"
+            )));
         }
     };
     // 与写入侧对称使用 as_table_like_mut：inline table 形态下 as_table_mut 返回
@@ -343,6 +355,31 @@ command = ""
     }
 
     #[test]
+    #[serial_test::serial]
+    fn remove_server_reports_invalid_live_toml_instead_of_succeeding() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        let grok_dir = temp.path().join(".grok");
+        std::fs::create_dir_all(&grok_dir).unwrap();
+        let invalid = "[mcp_servers.demo\ncommand = \"echo\"";
+        std::fs::write(grok_dir.join("config.toml"), invalid).unwrap();
+
+        let result = remove_server_from_grokbuild("demo");
+
+        match original_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        let error = result.expect_err("an unperformed removal must not report success");
+        assert!(matches!(error, AppError::McpValidation(_)));
+        assert_eq!(
+            std::fs::read_to_string(grok_dir.join("config.toml")).unwrap(),
+            invalid
+        );
+    }
+
+    #[test]
     fn grokbuild_specs_equivalent_neutralizes_dialect_round_trip() {
         // DB 规范带显式 type + 投影方向会丢弃的复杂字段；live 派生规范由
         // Grok 方言（无 type）推断而来——两者必须判等。
@@ -365,5 +402,68 @@ command = ""
         let db_spec = json!({ "type": "stdio", "command": "node", "cwd": "/opt/old" });
         let live_spec = json!({ "type": "stdio", "command": "node", "cwd": "/opt/new" });
         assert!(!grokbuild_specs_equivalent(&db_spec, &live_spec));
+    }
+
+    #[test]
+    fn merge_grokbuild_live_spec_preserves_unprojectable_shared_extensions() {
+        let db_spec = json!({
+            "type": "stdio",
+            "command": "old-command",
+            "cwd": "/old",
+            "shared_extension": { "nested": 42 },
+            "mixed_extension": ["kept", { "secret": "value" }]
+        });
+        let live_spec = json!({
+            "type": "stdio",
+            "command": "new-command"
+        });
+
+        let merged = merge_grokbuild_live_spec(&db_spec, &live_spec);
+        assert_eq!(merged["command"], "new-command");
+        assert!(
+            merged.get("cwd").is_none(),
+            "representable deletion must propagate"
+        );
+        assert_eq!(merged["shared_extension"], db_spec["shared_extension"]);
+        assert_eq!(merged["mixed_extension"], db_spec["mixed_extension"]);
+    }
+
+    #[test]
+    fn merge_grokbuild_live_spec_preserves_nested_unprojectable_values_and_drops_alias() {
+        let db_spec = json!({
+            "type": "http",
+            "url": "https://old.example.test",
+            "headers": {
+                "Authorization": "Bearer old",
+                "X-Delete": "old",
+                "nested_extension": { "keep": 42 },
+                "numeric_extension": 7
+            },
+            "http_headers": { "Stale": "legacy alias" },
+            "mixed_object": {
+                "visible": "old",
+                "nested": { "keep": true }
+            }
+        });
+        let live_spec = json!({
+            "type": "http",
+            "url": "https://new.example.test",
+            "headers": {
+                "Authorization": "Bearer new",
+                "X-New": "new"
+            },
+            "mixed_object": { "visible": "new" }
+        });
+
+        let merged = merge_grokbuild_live_spec(&db_spec, &live_spec);
+        assert_eq!(merged["url"], "https://new.example.test");
+        assert_eq!(merged["headers"]["Authorization"], "Bearer new");
+        assert_eq!(merged["headers"]["X-New"], "new");
+        assert!(merged["headers"].get("X-Delete").is_none());
+        assert_eq!(merged["headers"]["nested_extension"]["keep"], 42);
+        assert_eq!(merged["headers"]["numeric_extension"], 7);
+        assert_eq!(merged["mixed_object"]["visible"], "new");
+        assert_eq!(merged["mixed_object"]["nested"]["keep"], true);
+        assert!(merged.get("http_headers").is_none());
     }
 }

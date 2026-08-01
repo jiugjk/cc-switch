@@ -1,5 +1,7 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::app_config::{AppType, McpApps, McpServer};
 use crate::error::AppError;
@@ -9,6 +11,45 @@ use crate::store::AppState;
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
 
+static MCP_LIVE_TRANSACTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
+type McpTransitionTestHook = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+#[cfg(test)]
+static MCP_TRANSITION_TEST_HOOK: OnceLock<Mutex<Option<McpTransitionTestHook>>> = OnceLock::new();
+
+struct LiveFileSnapshot {
+    app: AppType,
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+}
+
+impl LiveFileSnapshot {
+    fn capture(app: AppType, path: PathBuf) -> Result<Self, AppError> {
+        let contents = match std::fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AppError::io(&path, error)),
+        };
+        Ok(Self {
+            app,
+            path,
+            contents,
+        })
+    }
+
+    fn restore(&self) -> Result<(), AppError> {
+        match &self.contents {
+            Some(contents) => crate::config::atomic_write(&self.path, contents),
+            None => match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(AppError::io(&self.path, error)),
+            },
+        }
+    }
+}
+
 impl McpService {
     /// 获取所有 MCP 服务器（统一结构）
     pub fn get_all_servers(state: &AppState) -> Result<IndexMap<String, McpServer>, AppError> {
@@ -17,55 +58,67 @@ impl McpService {
 
     /// 添加或更新 MCP 服务器
     pub fn upsert_server(state: &AppState, server: McpServer) -> Result<(), AppError> {
-        // 读取旧状态：用于处理“编辑时取消勾选某个应用”的场景（需要从对应 live 配置中移除）
-        let prev_apps = state
-            .db
-            .get_all_mcp_servers()?
-            .get(&server.id)
-            .map(|s| s.apps.clone())
-            .unwrap_or_default();
+        let _transaction_guard = Self::lock_live_transaction()?;
+        Self::upsert_server_locked(state, server)
+    }
 
-        state.db.save_mcp_server(&server)?;
+    fn upsert_server_locked(state: &AppState, server: McpServer) -> Result<(), AppError> {
+        let previous = state.db.get_all_mcp_servers()?.get(&server.id).cloned();
+        let live_snapshots = Self::capture_live_snapshots(previous.as_ref(), Some(&server))?;
 
-        // 处理禁用：若旧版本启用但新版本取消，则需要从该应用的 live 配置移除
-        if prev_apps.claude && !server.apps.claude {
-            Self::remove_server_from_app(state, &server.id, &AppType::Claude)?;
-        }
-        if prev_apps.codex && !server.apps.codex {
-            Self::remove_server_from_app(state, &server.id, &AppType::Codex)?;
-        }
-        if prev_apps.gemini && !server.apps.gemini {
-            Self::remove_server_from_app(state, &server.id, &AppType::Gemini)?;
-        }
-        if prev_apps.grokbuild && !server.apps.grokbuild {
-            Self::remove_server_from_app(state, &server.id, &AppType::GrokBuild)?;
-        }
-        if prev_apps.opencode && !server.apps.opencode {
-            Self::remove_server_from_app(state, &server.id, &AppType::OpenCode)?;
-        }
-        if prev_apps.hermes && !server.apps.hermes {
-            Self::remove_server_from_app(state, &server.id, &AppType::Hermes)?;
+        #[cfg(test)]
+        Self::run_transition_test_hook(&server.id);
+
+        if let Err(error) = Self::apply_live_transition(state, previous.as_ref(), &server) {
+            let rollback_failures = Self::restore_live_snapshots(&live_snapshots);
+            return Err(Self::transition_error(
+                "更新 MCP live 配置失败",
+                error,
+                rollback_failures,
+            ));
         }
 
-        // 同步到各个启用的应用
-        Self::sync_server_to_apps(state, &server)?;
+        if let Err(error) = state.db.save_mcp_server(&server) {
+            let rollback_failures = Self::restore_live_snapshots(&live_snapshots);
+            return Err(Self::transition_error(
+                "保存 MCP 数据库状态失败",
+                error,
+                rollback_failures,
+            ));
+        }
 
         Ok(())
     }
 
     /// 删除 MCP 服务器
     pub fn delete_server(state: &AppState, id: &str) -> Result<bool, AppError> {
+        let _transaction_guard = Self::lock_live_transaction()?;
         let server = state.db.get_all_mcp_servers()?.shift_remove(id);
 
-        if let Some(server) = server {
-            state.db.delete_mcp_server(id)?;
+        let Some(server) = server else {
+            return Ok(false);
+        };
+        let live_snapshots = Self::capture_live_snapshots(Some(&server), None)?;
 
-            // 从所有应用的 live 配置中移除
-            Self::remove_server_from_all_apps(state, id, &server)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        if let Err(error) = Self::remove_server_from_all_apps(state, id, &server) {
+            let rollback_failures = Self::restore_live_snapshots(&live_snapshots);
+            return Err(Self::transition_error(
+                "删除 MCP live 配置失败",
+                error,
+                rollback_failures,
+            ));
         }
+
+        if let Err(error) = state.db.delete_mcp_server(id) {
+            let rollback_failures = Self::restore_live_snapshots(&live_snapshots);
+            return Err(Self::transition_error(
+                "删除 MCP 数据库状态失败",
+                error,
+                rollback_failures,
+            ));
+        }
+
+        Ok(true)
     }
 
     /// 切换指定应用的启用状态
@@ -75,21 +128,106 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
-        let mut servers = state.db.get_all_mcp_servers()?;
+        let _transaction_guard = Self::lock_live_transaction()?;
+        let Some(mut server) = state.db.get_all_mcp_servers()?.get(server_id).cloned() else {
+            return Ok(());
+        };
+        server.apps.set_enabled_for(&app, enabled);
+        Self::upsert_server_locked(state, server)?;
 
-        if let Some(server) = servers.get_mut(server_id) {
-            server.apps.set_enabled_for(&app, enabled);
-            state.db.save_mcp_server(server)?;
+        Ok(())
+    }
 
-            // 同步到对应应用
-            if enabled {
-                Self::sync_server_to_app(state, server, &app)?;
-            } else {
-                Self::remove_server_from_app(state, server_id, &app)?;
+    fn apply_live_transition(
+        state: &AppState,
+        previous: Option<&McpServer>,
+        next: &McpServer,
+    ) -> Result<(), AppError> {
+        for app in AppType::all() {
+            let was_enabled = previous.is_some_and(|server| server.apps.is_enabled_for(&app));
+            let will_be_enabled = next.apps.is_enabled_for(&app);
+            if was_enabled && !will_be_enabled {
+                Self::remove_server_from_app(state, &next.id, &app)?;
             }
         }
 
-        Ok(())
+        // Re-project every enabled target, including unchanged flags, because the server
+        // command/url/env itself may have changed.
+        Self::sync_server_to_apps(state, next)
+    }
+
+    fn lock_live_transaction() -> Result<MutexGuard<'static, ()>, AppError> {
+        MCP_LIVE_TRANSACTION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|error| AppError::Message(format!("MCP live 事务锁已损坏: {error}")))
+    }
+
+    #[cfg(test)]
+    fn run_transition_test_hook(server_id: &str) {
+        let hook = MCP_TRANSITION_TEST_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(server_id);
+        }
+    }
+
+    fn live_config_path(app: &AppType) -> Option<PathBuf> {
+        match app {
+            AppType::Claude => Some(crate::config::get_claude_mcp_path()),
+            AppType::Codex => Some(crate::codex_config::get_codex_config_path()),
+            AppType::Gemini => Some(crate::gemini_config::get_gemini_settings_path()),
+            AppType::GrokBuild => Some(crate::grok_config::get_grok_config_path()),
+            AppType::OpenCode => Some(crate::opencode_config::get_opencode_config_path()),
+            AppType::Hermes => Some(crate::hermes_config::get_hermes_config_path()),
+            AppType::ClaudeDesktop | AppType::OpenClaw => None,
+        }
+    }
+
+    fn capture_live_snapshots(
+        previous: Option<&McpServer>,
+        attempted: Option<&McpServer>,
+    ) -> Result<Vec<LiveFileSnapshot>, AppError> {
+        let mut snapshots = Vec::new();
+        for app in AppType::all() {
+            let was_enabled = previous.is_some_and(|server| server.apps.is_enabled_for(&app));
+            let was_touched = attempted.is_some_and(|server| server.apps.is_enabled_for(&app));
+            if !was_enabled && !was_touched {
+                continue;
+            }
+            if let Some(path) = Self::live_config_path(&app) {
+                snapshots.push(LiveFileSnapshot::capture(app, path)?);
+            }
+        }
+        Ok(snapshots)
+    }
+
+    fn restore_live_snapshots(snapshots: &[LiveFileSnapshot]) -> Vec<String> {
+        let mut failures = Vec::new();
+        for snapshot in snapshots.iter().rev() {
+            if let Err(error) = snapshot.restore() {
+                failures.push(format!("{}: {error}", snapshot.app.as_str()));
+            }
+        }
+        failures
+    }
+
+    fn transition_error(
+        context: &str,
+        error: AppError,
+        rollback_failures: Vec<String>,
+    ) -> AppError {
+        if rollback_failures.is_empty() {
+            error
+        } else {
+            AppError::Message(format!(
+                "{context}: {error}; live 回滚也失败: {}",
+                rollback_failures.join("; ")
+            ))
+        }
     }
 
     /// 将 MCP 服务器同步到所有启用的应用
@@ -295,7 +433,13 @@ impl McpService {
                 if specs_equivalent(&existing.server, &live_spec) {
                     continue;
                 }
-                existing.server = live_spec;
+                existing.server = match app {
+                    AppType::Codex => mcp::merge_codex_live_spec(&existing.server, &live_spec),
+                    AppType::GrokBuild => {
+                        mcp::merge_grokbuild_live_spec(&existing.server, &live_spec)
+                    }
+                    _ => live_spec,
+                };
                 if let Err(err) = state.db.save_mcp_server(existing) {
                     log::warn!("回填 live MCP 编辑到 '{id}' 失败: {err}");
                     continue;
@@ -630,5 +774,231 @@ impl McpService {
                 failures.join("; ")
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use serial_test::serial;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    struct TestHome {
+        original: Option<std::ffi::OsString>,
+        dir: tempfile::TempDir,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().expect("temp home");
+            let original = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            Self { original, dir }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    struct TransitionHookReset;
+
+    impl Drop for TransitionHookReset {
+        fn drop(&mut self) {
+            *MCP_TRANSITION_TEST_HOOK
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+        }
+    }
+
+    fn test_server(id: &str, command: &str, apps: McpApps) -> McpServer {
+        McpServer {
+            id: id.to_string(),
+            name: id.to_string(),
+            server: json!({ "type": "stdio", "command": command }),
+            apps,
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn invalid_codex_toml_does_not_commit_toggle_or_delete_to_db() {
+        let home = TestHome::new();
+        let codex_dir = home.dir.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let invalid = "[mcp_servers.demo\ncommand = \"echo\"";
+        std::fs::write(codex_dir.join("config.toml"), invalid).unwrap();
+
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        db.save_mcp_server(&test_server(
+            "demo",
+            "echo",
+            McpApps {
+                codex: true,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+
+        let toggle = McpService::toggle_app(&state, "demo", AppType::Codex, false);
+        assert!(toggle.is_err());
+        assert!(db.get_all_mcp_servers().unwrap()["demo"].apps.codex);
+
+        let delete = McpService::delete_server(&state, "demo");
+        assert!(delete.is_err());
+        assert!(db.get_all_mcp_servers().unwrap().contains_key("demo"));
+        assert_eq!(
+            std::fs::read_to_string(codex_dir.join("config.toml")).unwrap(),
+            invalid
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cross_app_failure_restores_exact_codex_live_snapshot() {
+        let home = TestHome::new();
+        let codex_dir = home.dir.path().join(".codex");
+        let gemini_dir = home.dir.path().join(".gemini");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::create_dir_all(&gemini_dir).unwrap();
+
+        let original_codex = br#"model = "manual-global"
+future_top_level = "keep"
+
+[features]
+unknown_global_feature = true
+
+[mcp_servers.demo]
+type = "stdio"
+command = "manual-live"
+args = ["--manual"]
+
+[mcp_servers.hand_added]
+type = "stdio"
+command = "manual-only"
+"#;
+        let codex_path = codex_dir.join("config.toml");
+        std::fs::write(&codex_path, original_codex).unwrap();
+        let gemini_path = crate::gemini_config::get_gemini_settings_path();
+        std::fs::write(&gemini_path, b"{ invalid gemini json").unwrap();
+
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let apps = McpApps {
+            codex: true,
+            gemini: true,
+            ..Default::default()
+        };
+        db.save_mcp_server(&test_server("demo", "db-old", apps.clone()))
+            .unwrap();
+
+        let error = McpService::upsert_server(&state, test_server("demo", "next", apps))
+            .expect_err("Gemini parse failure must roll back the earlier Codex write");
+        assert!(error.to_string().contains("Gemini") || error.to_string().contains("JSON"));
+        assert_eq!(
+            db.get_all_mcp_servers().unwrap()["demo"].server["command"],
+            "db-old"
+        );
+        let restored_codex = std::fs::read(&codex_path).unwrap();
+        assert_eq!(
+            restored_codex, original_codex,
+            "rollback must restore the complete pre-transaction file byte-for-byte"
+        );
+        let restored: toml::Value =
+            toml::from_str(std::str::from_utf8(&restored_codex).unwrap()).unwrap();
+        assert_eq!(restored["future_top_level"].as_str(), Some("keep"));
+        assert_eq!(
+            restored["features"]["unknown_global_feature"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            restored["mcp_servers"]["demo"]["command"].as_str(),
+            Some("manual-live")
+        );
+        assert_eq!(
+            restored["mcp_servers"]["hand_added"]["command"].as_str(),
+            Some("manual-only")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn concurrent_toggle_waits_for_upsert_and_reads_committed_db_state() {
+        let _home = TestHome::new();
+        let _hook_reset = TransitionHookReset;
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        db.save_mcp_server(&test_server("serialized", "old", McpApps::default()))
+            .unwrap();
+
+        let first_hook = Arc::new(AtomicBool::new(true));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        *MCP_TRANSITION_TEST_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::new({
+            let first_hook = first_hook.clone();
+            let release_rx = release_rx.clone();
+            move |server_id| {
+                if server_id == "serialized" && first_hook.swap(false, Ordering::SeqCst) {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .recv_timeout(Duration::from_secs(5));
+                }
+            }
+        }));
+
+        let first_db = db.clone();
+        let first = std::thread::spawn(move || {
+            let state = AppState::new(first_db);
+            McpService::upsert_server(
+                &state,
+                test_server("serialized", "committed-first", McpApps::default()),
+            )
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first transaction reached controlled point");
+
+        let second_db = db.clone();
+        let (second_done_tx, second_done_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let state = AppState::new(second_db);
+            let result = McpService::toggle_app(&state, "serialized", AppType::Codex, true);
+            let _ = second_done_tx.send(result);
+        });
+        assert!(matches!(
+            second_done_rx.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second transaction result")
+            .unwrap();
+        second.join().unwrap();
+
+        let final_server = db.get_all_mcp_servers().unwrap()["serialized"].clone();
+        assert_eq!(final_server.server["command"], "committed-first");
+        assert!(final_server.apps.codex);
     }
 }
