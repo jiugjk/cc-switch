@@ -101,9 +101,15 @@ fn decompress_single(
             let zlib = flate2::read::ZlibDecoder::new(body);
             match read_with_output_limit(zlib, max_output_bytes) {
                 Ok(decompressed) => Ok(Some(decompressed)),
+                Err(DecompressError::TooLarge { limit }) => {
+                    // A valid zlib stream that crossed the budget must never be
+                    // reinterpreted as raw deflate. If the raw decoder then
+                    // reports a format error, the caller would otherwise treat
+                    // this as an ordinary decode failure and fail open with the
+                    // original compressed body.
+                    Err(DecompressError::TooLarge { limit })
+                }
                 Err(zlib_err) => {
-                    // TooLarge 也要回退：raw 流被误判为 zlib 时可能在预算处截停，
-                    // 回退后若真是炸弹，raw 解码同样会触发 TooLarge。
                     log::debug!("deflate 按 zlib 解压失败（{zlib_err}），回退 raw deflate");
                     let raw = flate2::read::DeflateDecoder::new(body);
                     Ok(Some(read_with_output_limit(raw, max_output_bytes)?))
@@ -336,6 +342,21 @@ mod tests {
             matches!(result, Err(DecompressError::TooLarge { .. })),
             "zstd 压缩炸弹应在预算耗尽处截停: {:?}",
             result.as_ref().map(|o| o.as_ref().map(Vec::len))
+        );
+    }
+
+    #[test]
+    fn decompress_body_with_limit_rejects_oversized_zlib_deflate_without_raw_fallback() {
+        let payload = vec![b'x'; 1025];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &payload).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = decompress_body_with_limit("deflate", &compressed, 1024);
+        assert!(
+            matches!(result, Err(DecompressError::TooLarge { limit: 1024 })),
+            "超限的 zlib deflate 不得回退为 raw 并被 fail-open: {result:?}"
         );
     }
 
