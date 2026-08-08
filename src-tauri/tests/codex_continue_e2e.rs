@@ -46,6 +46,10 @@ const R2: &[u8] = include_bytes!("fixtures/codex_poc_r2.sse.txt");
 /// such a round is never continued (the call must reach the client, not be
 /// swallowed by a continuation).
 const R_TOOL: &[u8] = include_bytes!("fixtures/codex_tool_round.sse.txt");
+/// A normally completed reasoning round whose token count does not match the
+/// truncation fingerprint. TEST 4 proves the fold still emits the complete
+/// reasoning and message output without issuing a continuation request.
+const R_COMPLETE: &[u8] = include_bytes!("fixtures/codex_complete_round.sse.txt");
 
 /// The default continuation marker (mirrors `codex_continue::DEFAULT_MARKER`,
 /// which is private).
@@ -671,6 +675,83 @@ async fn codex_continue_never_swallows_a_tool_call_round() {
         bodies.len(),
         1,
         "tool-call round is never continued despite matching the truncation fingerprint"
+    );
+
+    let _ = state.proxy_service.stop().await;
+}
+
+// ============================================================================
+// TEST 4 — a normally completed reasoning round is passed through once
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "serialize process-global test HOME, settings cache, and CodexCont env overrides across async proxy calls"
+)]
+async fn codex_continue_preserves_non_truncated_reasoning_round() {
+    let _guard = support::test_mutex().lock().expect("acquire test mutex");
+    support::reset_test_fs();
+    let _home = support::ensure_test_home();
+    set_codex_continue_env("8");
+
+    let (mock_port, mock) = start_mock_upstream(vec![R_COMPLETE]).await;
+
+    let db = Arc::new(Database::memory().expect("in-memory database"));
+    let native = native_codex_provider("native-codex", mock_port, 0);
+    db.save_provider("codex", &native)
+        .expect("save native provider");
+    db.set_current_provider("codex", "native-codex")
+        .expect("set current provider");
+
+    let state = AppState::new(db);
+    let proxy_port = start_proxy(&state).await;
+
+    let (status, content_type, body_bytes) =
+        post_responses(proxy_port, &codex_request_body()).await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "complete response is 200");
+    assert!(
+        content_type.contains("text/event-stream"),
+        "complete response is SSE, got content-type: {content_type}"
+    );
+
+    let body = String::from_utf8_lossy(&body_bytes);
+    let events = parse_sse_events(&body);
+    let completed: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "response.completed")
+        .collect();
+    assert_eq!(completed.len(), 1, "exactly one terminal response.completed");
+
+    let response = &completed[0]["response"];
+    assert_eq!(response["status"], json!("completed"));
+    let output = response["output"].as_array().expect("output array");
+    assert_eq!(output.len(), 2, "reasoning and final message are preserved");
+    assert_eq!(output[0]["type"], json!("reasoning"));
+    assert!(non_empty_encrypted(&output[0]));
+    assert_eq!(output[1]["type"], json!("message"));
+    assert_eq!(
+        output[1]["content"][0]["text"],
+        json!("The answer is ready.")
+    );
+
+    let continue_md = &response["metadata"]["ccswitch_codex_continue"];
+    assert_eq!(continue_md["stopped_reason"], Value::Null);
+    let rounds = response["metadata"]["proxy_rounds"]
+        .as_array()
+        .expect("proxy_rounds array");
+    assert_eq!(rounds.len(), 1);
+    assert_eq!(rounds[0]["reasoning_tokens"], json!(20));
+    assert_eq!(rounds[0]["truncated"], json!(false));
+    assert_eq!(rounds[0]["continued"], json!(false));
+
+    let bodies = mock.bodies.lock().expect("mock bodies lock");
+    assert_eq!(bodies.len(), 1, "non-truncated reasoning is not continued");
+    let input = bodies[0]["input"].as_array().expect("input array");
+    assert!(
+        input.iter().all(|item| item["phase"] != json!("commentary")),
+        "a non-truncated round does not inject a continuation marker"
     );
 
     let _ = state.proxy_service.stop().await;

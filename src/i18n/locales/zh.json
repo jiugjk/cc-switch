@@ -405,7 +405,8 @@
         "marker": "续写提示",
         "markerDescription": "用于触发下一轮 reasoning continuation；环境变量仍可临时覆盖这些参数。",
         "enabledToast": "CodexCont 自动续写已启用",
-        "disabledToast": "CodexCont 自动续写已关闭"
+        "disabledToast": "CodexCont 自动续写已关闭",
+        "savedToast": "续写配置保存成功"
       },
       "optimizer": {
         "title": "Bedrock 请求优化器",

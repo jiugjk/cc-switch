@@ -405,7 +405,8 @@
         "marker": "續寫提示",
         "markerDescription": "用於觸發下一輪 reasoning continuation；環境變數仍可暫時覆蓋這些參數。",
         "enabledToast": "CodexCont 自動續寫已啟用",
-        "disabledToast": "CodexCont 自動續寫已關閉"
+        "disabledToast": "CodexCont 自動續寫已關閉",
+        "savedToast": "續寫配置儲存成功"
       },
       "optimizer": {
         "title": "Bedrock 請求最佳化工具",

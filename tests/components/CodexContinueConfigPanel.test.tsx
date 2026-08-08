@@ -7,6 +7,11 @@ const apiMocks = vi.hoisted(() => ({
   set: vi.fn(),
 }));
 
+const toastMocks = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+}));
+
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: {
     getCodexContinueConfig: apiMocks.get,
@@ -22,7 +27,7 @@ vi.mock("react-i18next", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: toastMocks,
 }));
 
 const loadedConfig = {
@@ -46,6 +51,8 @@ describe("CodexContinueConfigPanel", () => {
   beforeEach(() => {
     apiMocks.get.mockReset().mockResolvedValue(loadedConfig);
     apiMocks.set.mockReset().mockResolvedValue(true);
+    toastMocks.success.mockReset();
+    toastMocks.error.mockReset();
   });
 
   it("keeps unsaved advanced edits when toggling enabled", async () => {
@@ -80,6 +87,24 @@ describe("CodexContinueConfigPanel", () => {
         ...loadedConfig,
         maxContinuations: 32,
       }),
+    );
+  });
+
+  it("shows a configuration-saved toast when saving advanced settings", async () => {
+    render(<CodexContinueConfigPanel />);
+
+    const maxInput = await screen.findByLabelText("最大续写轮数");
+    fireEvent.change(maxInput, { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(toastMocks.success).toHaveBeenCalledWith("续写配置保存成功", {
+        closeButton: true,
+      }),
+    );
+    expect(toastMocks.success).not.toHaveBeenCalledWith(
+      "CodexCont 自动续写已启用",
+      { closeButton: true },
     );
   });
 

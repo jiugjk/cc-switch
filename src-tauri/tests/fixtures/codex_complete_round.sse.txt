@@ -1,0 +1,25 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_complete_round_1","object":"response","status":"in_progress","model":"gpt-5.5","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"rs_complete_1","type":"reasoning","content":[],"encrypted_content":"enc-complete-round-1","summary":[]},"output_index":0}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","delta":"Checking the answer","output_index":0}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"rs_complete_1","type":"reasoning","content":[],"encrypted_content":"enc-complete-round-1","summary":[{"type":"summary_text","text":"Checking the answer"}]},"output_index":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"msg_complete_1","type":"message","role":"assistant","content":[]},"output_index":1}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"The answer is ready.","output_index":1}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"msg_complete_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"The answer is ready."}]},"output_index":1}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_complete_round_1","object":"response","status":"completed","model":"gpt-5.5","output":[{"id":"rs_complete_1","type":"reasoning","encrypted_content":"enc-complete-round-1"},{"id":"msg_complete_1","type":"message"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":20},"total_tokens":130}}
+
+data: [DONE]

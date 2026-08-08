@@ -405,7 +405,8 @@
         "marker": "Continuation prompt",
         "markerDescription": "Sent to trigger the next reasoning continuation round; environment variables can still temporarily override these parameters.",
         "enabledToast": "CodexCont auto-continuation enabled",
-        "disabledToast": "CodexCont auto-continuation disabled"
+        "disabledToast": "CodexCont auto-continuation disabled",
+        "savedToast": "CodexCont continuation settings saved"
       },
       "optimizer": {
         "title": "Bedrock Request Optimizer",

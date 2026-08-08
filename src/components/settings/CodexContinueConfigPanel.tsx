@@ -16,6 +16,8 @@ const DEFAULT_CODEX_CONTINUE_CONFIG: CodexContinueConfig = {
     "We need continue thinking. Do not summarize; continue from the previous reasoning state.",
 };
 
+type SuccessToastKind = "toggle" | "saved";
+
 export function CodexContinueConfigPanel() {
   const { t } = useTranslation();
   const [config, setConfig] = useState<CodexContinueConfig>(
@@ -54,6 +56,7 @@ export function CodexContinueConfigPanel() {
   const handleChange = (
     updates: Partial<CodexContinueConfig>,
     preserveAdvancedDraft = false,
+    successToastKind: SuccessToastKind = "toggle",
   ) => {
     // Tauri commands may complete out of order. Build every intent from the
     // latest optimistic value, then serialize the complete snapshots so the
@@ -75,7 +78,11 @@ export function CodexContinueConfigPanel() {
         committedConfigRef.current = newConfig;
         if (isMountedRef.current && intent === latestIntentRef.current) {
           toast.success(
-            newConfig.enabled
+            successToastKind === "saved"
+              ? t("settings.advanced.codexContinue.savedToast", {
+                  defaultValue: "续写配置保存成功",
+                })
+              : newConfig.enabled
               ? t("settings.advanced.codexContinue.enabledToast", {
                   defaultValue: "CodexCont 自动续写已启用",
                 })
@@ -120,7 +127,7 @@ export function CodexContinueConfigPanel() {
     );
     const step = Math.max(3, Math.floor(draft.step));
     const marker = draft.marker.trim() || DEFAULT_CODEX_CONTINUE_CONFIG.marker;
-    await handleChange({ maxContinuations, step, marker });
+    await handleChange({ maxContinuations, step, marker }, false, "saved");
   };
 
   const updateDraft = (updates: Partial<CodexContinueConfig>) => {

@@ -405,7 +405,8 @@
         "marker": "継続プロンプト",
         "markerDescription": "次の reasoning continuation を促すために送信されます。環境変数でこれらのパラメータを一時的に上書きできます。",
         "enabledToast": "CodexCont 自動継続を有効にしました",
-        "disabledToast": "CodexCont 自動継続を無効にしました"
+        "disabledToast": "CodexCont 自動継続を無効にしました",
+        "savedToast": "CodexCont 継続設定を保存しました"
       },
       "optimizer": {
         "title": "Bedrock リクエストオプティマイザー",
