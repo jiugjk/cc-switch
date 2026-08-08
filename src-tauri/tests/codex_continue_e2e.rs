@@ -722,7 +722,11 @@ async fn codex_continue_preserves_non_truncated_reasoning_round() {
         .iter()
         .filter(|event| event["type"] == "response.completed")
         .collect();
-    assert_eq!(completed.len(), 1, "exactly one terminal response.completed");
+    assert_eq!(
+        completed.len(),
+        1,
+        "exactly one terminal response.completed"
+    );
 
     let response = &completed[0]["response"];
     assert_eq!(response["status"], json!("completed"));
@@ -750,7 +754,9 @@ async fn codex_continue_preserves_non_truncated_reasoning_round() {
     assert_eq!(bodies.len(), 1, "non-truncated reasoning is not continued");
     let input = bodies[0]["input"].as_array().expect("input array");
     assert!(
-        input.iter().all(|item| item["phase"] != json!("commentary")),
+        input
+            .iter()
+            .all(|item| item["phase"] != json!("commentary")),
         "a non-truncated round does not inject a continuation marker"
     );
 

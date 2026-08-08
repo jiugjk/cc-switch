@@ -83,12 +83,12 @@ export function CodexContinueConfigPanel() {
                   defaultValue: "续写配置保存成功",
                 })
               : newConfig.enabled
-              ? t("settings.advanced.codexContinue.enabledToast", {
-                  defaultValue: "CodexCont 自动续写已启用",
-                })
-              : t("settings.advanced.codexContinue.disabledToast", {
-                  defaultValue: "CodexCont 自动续写已关闭",
-                }),
+                ? t("settings.advanced.codexContinue.enabledToast", {
+                    defaultValue: "CodexCont 自动续写已启用",
+                  })
+                : t("settings.advanced.codexContinue.disabledToast", {
+                    defaultValue: "CodexCont 自动续写已关闭",
+                  }),
             { closeButton: true },
           );
         }
