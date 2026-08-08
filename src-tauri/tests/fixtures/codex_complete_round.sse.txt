@@ -20,6 +20,6 @@ event: response.output_item.done
 data: {"type":"response.output_item.done","item":{"id":"msg_complete_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"The answer is ready."}]},"output_index":1}
 
 event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_complete_round_1","object":"response","status":"completed","model":"gpt-5.5","output":[{"id":"rs_complete_1","type":"reasoning","encrypted_content":"enc-complete-round-1"},{"id":"msg_complete_1","type":"message"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":20},"total_tokens":130}}
+data: {"type":"response.completed","response":{"id":"resp_complete_round_1","object":"response","status":"completed","model":"gpt-5.5","output":[{"id":"rs_complete_1","type":"reasoning","encrypted_content":"enc-complete-round-1"},{"id":"msg_complete_1","type":"message"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":20},"total_tokens":130}}}
 
 data: [DONE]
