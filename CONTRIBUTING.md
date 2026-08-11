@@ -50,7 +50,6 @@ pnpm dev
 | `pnpm build` | Production build |
 | `pnpm typecheck` | TypeScript type checking |
 | `pnpm test:unit` | Run unit tests |
-| `pnpm lint` | ESLint check |
 | `pnpm format` | Format code (Prettier) |
 | `pnpm format:check` | Check code formatting |
 
@@ -65,7 +64,7 @@ cargo test       # Run tests
 
 ## Code Style
 
-- **Frontend**: Prettier for formatting, ESLint for linting, strict TypeScript (`pnpm typecheck`)
+- **Frontend**: Prettier for formatting, strict TypeScript (`pnpm typecheck`)
 - **Backend**: `cargo fmt` for formatting, `cargo clippy` for linting
 - **Tauri 2.0**: Command names must use camelCase
 
@@ -118,12 +117,13 @@ By submitting a PR, you agree to the following:
 
 ## Internationalization (i18n)
 
-CC Switch supports three languages. When modifying user-facing text:
+CC Switch supports English, Simplified Chinese, Traditional Chinese, and Japanese. When modifying user-facing text:
 
-1. Update **all three** locale files:
-   - `src/locales/en/translation.json`
-   - `src/locales/zh/translation.json`
-   - `src/locales/ja/translation.json`
+1. Update **all four** locale files:
+   - `src/i18n/locales/en.json`
+   - `src/i18n/locales/zh.json`
+   - `src/i18n/locales/zh-TW.json`
+   - `src/i18n/locales/ja.json`
 2. Use the `t()` function from i18next for all UI text.
 3. Never hardcode user-facing strings.
 
@@ -184,7 +184,6 @@ pnpm dev
 | `pnpm build` | 构建生产版本 |
 | `pnpm typecheck` | TypeScript 类型检查 |
 | `pnpm test:unit` | 运行单元测试 |
-| `pnpm lint` | ESLint 检查 |
 | `pnpm format` | 格式化代码（Prettier） |
 | `pnpm format:check` | 检查代码格式 |
 
@@ -199,7 +198,7 @@ cargo test       # 运行测试
 
 ## 代码规范
 
-- **前端**：使用 Prettier 格式化、ESLint 检查、严格 TypeScript（`pnpm typecheck`）
+- **前端**：使用 Prettier 格式化、严格 TypeScript（`pnpm typecheck`）
 - **后端**：使用 `cargo fmt` 格式化、`cargo clippy` 检查
 - **Tauri 2.0**：命令名必须使用 camelCase
 
@@ -252,12 +251,13 @@ chore(deps): update dependencies
 
 ## 国际化（i18n）
 
-CC Switch 支持三种语言。修改用户可见文本时：
+CC Switch 支持英文、简体中文、繁体中文和日文。修改用户可见文本时：
 
-1. **同时更新三个**语言文件：
-   - `src/locales/en/translation.json`
-   - `src/locales/zh/translation.json`
-   - `src/locales/ja/translation.json`
+1. **同时更新四个**语言文件：
+   - `src/i18n/locales/en.json`
+   - `src/i18n/locales/zh.json`
+   - `src/i18n/locales/zh-TW.json`
+   - `src/i18n/locales/ja.json`
 2. 所有 UI 文本使用 i18next 的 `t()` 函数。
 3. 不要硬编码用户可见的字符串。
 
