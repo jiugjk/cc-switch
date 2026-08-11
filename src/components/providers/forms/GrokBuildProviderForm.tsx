@@ -521,7 +521,7 @@ export function GrokBuildProviderForm({
       <form
         id="provider-form"
         onSubmit={form.handleSubmit(handleSubmit)}
-        className="space-y-6"
+        className="space-y-6 glass rounded-xl p-6 border border-white/10"
       >
         {!initialData && (
           <ProviderPresetSelector
@@ -661,7 +661,7 @@ export function GrokBuildProviderForm({
                 onChange={handleRawConfigChange}
                 placeholder=""
                 darkMode={isDarkMode}
-                rows={12}
+                rows={3}
                 showValidation={false}
                 language="javascript"
               />
