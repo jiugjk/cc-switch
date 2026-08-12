@@ -579,7 +579,13 @@ mod tests {
             std::env::var_os("CC_SWITCH_WSL_TEST_DIR").expect("CC_SWITCH_WSL_TEST_DIR must be set"),
         );
         let home = get_home_dir();
-        let temp = std::env::temp_dir();
+        // Keep the process-wide Windows TEMP native so link.exe/mt.exe can create
+        // manifests. The contract's WSL-backed temp directory is supplied
+        // explicitly by the workflow instead.
+        let temp = PathBuf::from(
+            std::env::var_os("CC_SWITCH_WSL_TEST_TEMP")
+                .expect("CC_SWITCH_WSL_TEST_TEMP must be set"),
+        );
         for (name, path) in [
             ("test root", root.as_path()),
             ("test home", home.as_path()),
@@ -599,7 +605,7 @@ mod tests {
 
         let dir = tempfile::Builder::new()
             .prefix("atomic-write-contract-")
-            .tempdir_in(&root)
+            .tempdir_in(&temp)
             .unwrap();
         assert_atomic_write_replaces_existing_file(dir.path());
     }
