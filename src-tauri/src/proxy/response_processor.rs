@@ -13,7 +13,6 @@ use super::{
     usage::parser::TokenUsage,
     ProxyError,
 };
-use crate::database::PRICING_SOURCE_REQUEST;
 use axum::http::{header::HeaderMap, HeaderName};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -638,15 +637,6 @@ async fn log_usage_internal(
 ) {
     use super::usage::logger::UsageLogger;
 
-    let logger = UsageLogger::new(&state.db);
-    let (multiplier, pricing_model_source) =
-        logger.resolve_pricing_config(provider_id, app_type).await;
-    let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
-        outbound_model
-    } else {
-        model
-    };
-
     let dedup_scope = super::usage::parser::dedup_scope_for_app(app_type, provider_id);
     let request_id = usage.dedup_request_id(dedup_scope);
 
@@ -659,22 +649,24 @@ async fn log_usage_internal(
         usage.cache_creation_tokens
     );
 
-    if let Err(e) = logger.log_with_calculation(
+    if let Err(e) = UsageLogger::log_with_resolved_pricing(
+        state.db.clone(),
         request_id,
         provider_id.to_string(),
         app_type.to_string(),
         model.to_string(),
         request_model.to_string(),
-        pricing_model.to_string(),
+        outbound_model.to_string(),
         usage,
-        multiplier,
         latency_ms,
         first_token_ms,
         status_code,
         session_id,
         None, // provider_type
         is_streaming,
-    ) {
+    )
+    .await
+    {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
 }

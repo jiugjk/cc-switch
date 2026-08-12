@@ -39,27 +39,52 @@ impl ProviderRouter {
         let mut total_providers = 0usize;
         let mut circuit_open_count = 0usize;
 
-        // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
-        let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
-            Ok(config) => config.auto_failover_enabled,
-            Err(e) => {
-                log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
-                false
-            }
-        };
+        let app_type_owned = app_type.to_string();
+        // Take one snapshot on the blocking pool.  The previous implementation
+        // performed several synchronous rusqlite calls directly on the async
+        // worker (and tagged one of them async even though it never yielded).
+        let snapshot = self
+            .db
+            .spawn(move |db| {
+                let auto_failover_enabled =
+                    match futures::executor::block_on(db.get_proxy_config_for_app(&app_type_owned))
+                    {
+                        Ok(config) => config.auto_failover_enabled,
+                        Err(error) => {
+                            log::error!(
+                            "[{app_type_owned}] 读取 proxy_config 失败: {error}，默认禁用故障转移"
+                        );
+                            false
+                        }
+                    };
+                let all_providers = db.get_all_providers(&app_type_owned)?;
+                let queue = if auto_failover_enabled {
+                    db.get_failover_queue(&app_type_owned)?
+                        .into_iter()
+                        .map(|item| item.provider_id)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let current_id = if auto_failover_enabled {
+                    None
+                } else {
+                    AppType::from_str(&app_type_owned)
+                        .ok()
+                        .and_then(|app_enum| {
+                            crate::settings::get_effective_current_provider(db, &app_enum)
+                                .ok()
+                                .flatten()
+                        })
+                        .or_else(|| db.get_current_provider(&app_type_owned).ok().flatten())
+                };
+                Ok((auto_failover_enabled, all_providers, queue, current_id))
+            })
+            .await?;
+        let (auto_failover_enabled, all_providers, ordered_ids, current_id) = snapshot;
 
         if auto_failover_enabled {
             // 故障转移开启：仅按队列顺序依次尝试（P1 → P2 → ...）
-            let all_providers = self.db.get_all_providers(app_type)?;
-
-            // 使用 DAO 返回的排序结果，确保和前端展示一致
-            let ordered_ids: Vec<String> = self
-                .db
-                .get_failover_queue(app_type)?
-                .into_iter()
-                .map(|item| item.provider_id)
-                .collect();
-
             total_providers = ordered_ids.len();
 
             for provider_id in ordered_ids {
@@ -78,17 +103,8 @@ impl ProviderRouter {
             }
         } else {
             // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
-            let current_id = AppType::from_str(app_type)
-                .ok()
-                .and_then(|app_enum| {
-                    crate::settings::get_effective_current_provider(&self.db, &app_enum)
-                        .ok()
-                        .flatten()
-                })
-                .or_else(|| self.db.get_current_provider(app_type).ok().flatten());
-
             if let Some(current_id) = current_id {
-                if let Some(current) = self.db.get_provider_by_id(&current_id, app_type)? {
+                if let Some(current) = all_providers.get(&current_id).cloned() {
                     total_providers = 1;
                     result.push(current);
                 }
@@ -132,10 +148,17 @@ impl ProviderRouter {
         error_msg: Option<String>,
     ) -> Result<(), AppError> {
         // 1. 按应用独立获取熔断器配置
-        let failure_threshold = match self.db.get_proxy_config_for_app(app_type).await {
-            Ok(app_config) => app_config.circuit_failure_threshold,
-            Err(_) => 5, // 默认值
-        };
+        let app_type_owned = app_type.to_string();
+        let failure_threshold = self
+            .db
+            .spawn(move |db| {
+                Ok(
+                    futures::executor::block_on(db.get_proxy_config_for_app(&app_type_owned))
+                        .map(|config| config.circuit_failure_threshold)
+                        .unwrap_or(5),
+                )
+            })
+            .await?;
 
         // 2. 更新熔断器状态
         let circuit_key = format!("{app_type}:{provider_id}");
@@ -148,14 +171,18 @@ impl ProviderRouter {
         }
 
         // 3. 更新数据库健康状态（使用配置的阈值）
+        let provider_id_owned = provider_id.to_string();
+        let app_type_owned = app_type.to_string();
         self.db
-            .update_provider_health_with_threshold(
-                provider_id,
-                app_type,
-                success,
-                error_msg.clone(),
-                failure_threshold,
-            )
+            .spawn(move |db| {
+                futures::executor::block_on(db.update_provider_health_with_threshold(
+                    &provider_id_owned,
+                    &app_type_owned,
+                    success,
+                    error_msg,
+                    failure_threshold,
+                ))
+            })
             .await?;
 
         Ok(())
@@ -239,28 +266,37 @@ impl ProviderRouter {
             }
         }
 
-        // 如果不存在，获取写锁创建
-        let mut breakers = self.circuit_breakers.write().await;
-
-        // 双重检查，防止竞争条件
-        if let Some(breaker) = breakers.get(key) {
-            return breaker.clone();
-        }
-
         // 从 key 中提取 app_type (格式: "app_type:provider_id")
         let app_type = key.split(':').next().unwrap_or("claude");
 
-        // 按应用独立读取熔断器配置
-        let config = match self.db.get_proxy_config_for_app(app_type).await {
-            Ok(app_config) => crate::proxy::circuit_breaker::CircuitBreakerConfig {
-                failure_threshold: app_config.circuit_failure_threshold,
-                success_threshold: app_config.circuit_success_threshold,
-                timeout_seconds: app_config.circuit_timeout_seconds as u64,
-                error_rate_threshold: app_config.circuit_error_rate_threshold,
-                min_requests: app_config.circuit_min_requests,
-            },
-            Err(_) => crate::proxy::circuit_breaker::CircuitBreakerConfig::default(),
-        };
+        // Read configuration before taking the write lock. SQLite can block,
+        // and holding the map lock across that await would serialize unrelated
+        // providers and config refreshes.
+        let app_type_owned = app_type.to_string();
+        let config = self
+            .db
+            .spawn(move |db| {
+                Ok(
+                    futures::executor::block_on(db.get_proxy_config_for_app(&app_type_owned))
+                        .map(
+                            |app_config| crate::proxy::circuit_breaker::CircuitBreakerConfig {
+                                failure_threshold: app_config.circuit_failure_threshold,
+                                success_threshold: app_config.circuit_success_threshold,
+                                timeout_seconds: app_config.circuit_timeout_seconds as u64,
+                                error_rate_threshold: app_config.circuit_error_rate_threshold,
+                                min_requests: app_config.circuit_min_requests,
+                            },
+                        )
+                        .unwrap_or_default(),
+                )
+            })
+            .await
+            .unwrap_or_default();
+
+        let mut breakers = self.circuit_breakers.write().await;
+        if let Some(breaker) = breakers.get(key) {
+            return breaker.clone();
+        }
 
         let breaker = Arc::new(CircuitBreaker::new(config));
         breakers.insert(key.to_string(), breaker.clone());

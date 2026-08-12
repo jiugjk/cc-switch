@@ -170,7 +170,7 @@ fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result
                 Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
                     let _ = state
                         .db
-                        .set_config_snippet(app_type.as_str(), Some(snippet));
+                        .set_config_snippet_if_meaningful(app_type.as_str(), Some(snippet));
                     let _ = state
                         .db
                         .set_config_snippet_cleared(app_type.as_str(), false);

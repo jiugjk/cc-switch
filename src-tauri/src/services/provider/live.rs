@@ -717,7 +717,7 @@ pub(crate) fn write_live_with_common_config(
     write_live_snapshot(app_type, &effective_provider)
 }
 
-pub(crate) fn strip_common_config_from_live_settings(
+fn strip_common_config_from_live_settings(
     db: &Database,
     app_type: &AppType,
     provider: &Provider,
@@ -757,6 +757,205 @@ pub(crate) fn strip_common_config_from_live_settings(
     };
 
     restore_live_settings_for_provider_backfill(app_type, provider, backfill_settings)
+}
+
+/// Return whether a JSON value contains any meaningful (non-empty) data.
+///
+/// CLI tools commonly leave a syntactically valid skeleton behind when a user
+/// logs out (`{}`, `{ "auth": {} }`, or empty strings).  Treating those
+/// skeletons as snapshots would turn a read of live config into a destructive
+/// database update, so emptiness is evaluated recursively rather than only at
+/// the root object.
+fn value_has_semantic_content(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(_) | Value::Number(_) => true,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(values) => values.iter().any(value_has_semantic_content),
+        Value::Object(values) => values.values().any(value_has_semantic_content),
+    }
+}
+
+fn config_text_has_semantic_content(value: &Value) -> bool {
+    let Some(text) = value.as_str() else {
+        return value_has_semantic_content(value);
+    };
+    text.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    })
+}
+
+/// App-aware content check for a live provider snapshot.
+///
+/// The named sections are the parts written by each CLI.  Keeping this check
+/// app-aware makes an empty Codex `{ auth: {}, config: "" }` (or Gemini
+/// `{ env: {}, config: {} }`) untrusted while still accepting a config-only
+/// snapshot that can be safely enriched with the DB credential section.
+pub(crate) fn live_settings_have_content(app_type: &AppType, settings: &Value) -> bool {
+    let Some(root) = settings.as_object() else {
+        return false;
+    };
+
+    match app_type {
+        AppType::Codex => {
+            root.get("auth").is_some_and(value_has_semantic_content)
+                || root
+                    .get("config")
+                    .is_some_and(config_text_has_semantic_content)
+                || root
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "auth" && key.as_str() != "config")
+                    .any(|(_, value)| value_has_semantic_content(value))
+        }
+        AppType::Gemini => {
+            root.get("env").is_some_and(value_has_semantic_content)
+                || root.get("config").is_some_and(value_has_semantic_content)
+                || root
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "env" && key.as_str() != "config")
+                    .any(|(_, value)| value_has_semantic_content(value))
+        }
+        AppType::GrokBuild => {
+            root.get("config")
+                .is_some_and(config_text_has_semantic_content)
+                || root
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "config")
+                    .any(|(_, value)| value_has_semantic_content(value))
+        }
+        _ => value_has_semantic_content(settings),
+    }
+}
+
+/// Merge values from `source` only where the live value is absent/empty.
+/// Explicit non-empty live edits always win; nested objects are merged so a
+/// missing credential key cannot erase the other keys in a live auth/env map.
+fn merge_missing_nonempty_values(target: &mut Value, source: &Value) {
+    match (target, source) {
+        (Value::Object(target), Value::Object(source)) => {
+            for (key, source_value) in source {
+                match target.get_mut(key) {
+                    Some(target_value)
+                        if value_has_semantic_content(target_value)
+                            && target_value.is_object()
+                            && source_value.is_object() =>
+                    {
+                        merge_missing_nonempty_values(target_value, source_value);
+                    }
+                    Some(target_value) if value_has_semantic_content(target_value) => {}
+                    Some(target_value) if value_has_semantic_content(source_value) => {
+                        *target_value = source_value.clone();
+                    }
+                    Some(_) => {}
+                    None if value_has_semantic_content(source_value) => {
+                        target.insert(key.clone(), source_value.clone());
+                    }
+                    None => {}
+                }
+            }
+        }
+        (target, source)
+            if !value_has_semantic_content(target) && value_has_semantic_content(source) =>
+        {
+            *target = source.clone();
+        }
+        _ => {}
+    }
+}
+
+/// Preserve provider-owned credential sections while accepting non-empty live
+/// edits.  A CLI may rewrite only its config file (for example Codex logout
+/// removes `auth.json`), so replacing the entire settings object is unsafe.
+fn preserve_nonempty_db_credential_sections(
+    app_type: &AppType,
+    provider: &Provider,
+    settings: &mut Value,
+) {
+    let Some(settings_obj) = settings.as_object_mut() else {
+        return;
+    };
+    let stored = &provider.settings_config;
+
+    let merge_section = |settings_obj: &mut serde_json::Map<String, Value>, key: &str| {
+        let Some(stored_section) = stored.get(key) else {
+            return;
+        };
+        if !value_has_semantic_content(stored_section) {
+            return;
+        }
+        match settings_obj.get_mut(key) {
+            Some(live_section) => merge_missing_nonempty_values(live_section, stored_section),
+            None => {
+                settings_obj.insert(key.to_string(), stored_section.clone());
+            }
+        }
+    };
+
+    match app_type {
+        AppType::Claude | AppType::Gemini => merge_section(settings_obj, "env"),
+        AppType::Codex => merge_section(settings_obj, "auth"),
+        AppType::OpenCode => merge_section(settings_obj, "options"),
+        AppType::OpenClaw | AppType::Hermes => {
+            // OpenClaw uses camelCase, Hermes uses snake_case.  Preserve only
+            // provider credential/endpoint fields; models and other live-owned
+            // metadata remain authoritative from the live snapshot.
+            for key in ["apiKey", "baseUrl", "api_key", "base_url"] {
+                let Some(stored_value) = stored.get(key) else {
+                    continue;
+                };
+                if !value_has_semantic_content(stored_value) {
+                    continue;
+                }
+                match settings_obj.get_mut(key) {
+                    Some(live_value) if !value_has_semantic_content(live_value) => {
+                        *live_value = stored_value.clone();
+                    }
+                    None => {
+                        settings_obj.insert(key.to_string(), stored_value.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        AppType::GrokBuild | AppType::ClaudeDesktop => {}
+    }
+}
+
+/// The single trusted live -> DB convergence entry point.
+///
+/// `None` means the live snapshot is a syntactic skeleton or became empty
+/// after common-config stripping.  Callers must skip the provider update in
+/// that case.  Non-empty live fields win, while missing/empty provider-owned
+/// credential sections are filled from the DB snapshot.
+pub(crate) fn backfill_live_into_provider(
+    db: &Database,
+    app_type: &AppType,
+    provider: &Provider,
+    live: Value,
+) -> Option<Value> {
+    if !live_settings_have_content(app_type, &live) {
+        log::warn!(
+            "Skipping empty live backfill for {} provider '{}'",
+            app_type.as_str(),
+            provider.id
+        );
+        return None;
+    }
+
+    let mut settings = strip_common_config_from_live_settings(db, app_type, provider, live);
+    preserve_nonempty_db_credential_sections(app_type, provider, &mut settings);
+
+    if !live_settings_have_content(app_type, &settings) {
+        log::warn!(
+            "Skipping semantically empty live backfill for {} provider '{}'",
+            app_type.as_str(),
+            provider.id
+        );
+        return None;
+    }
+
+    Some(settings)
 }
 
 /// 与 `apply_codex_oauth_claude_context_defaults` 严格对称：注入产物只活在
@@ -1594,6 +1793,18 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
         settings_config,
         None,
     );
+    let Some(backfilled_settings) = backfill_live_into_provider(
+        state.db.as_ref(),
+        &app_type,
+        &provider,
+        provider.settings_config.clone(),
+    ) else {
+        // A present but semantically empty CLI file is not an install snapshot.
+        // Leave the database untouched and let the caller surface a normal
+        // "nothing to import" state.
+        return Ok(false);
+    };
+    provider.settings_config = backfilled_settings;
     provider.category = Some(
         if matches!(app_type, AppType::Codex) {
             let config_text = provider
@@ -1792,11 +2003,30 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
             match state.db.get_provider_by_id(&id, "opencode") {
                 Ok(Some(existing)) => {
                     let display_name = config.name.clone().unwrap_or_else(|| existing.name.clone());
-                    if existing.settings_config != settings_config || existing.name != display_name
+                    let Some(settings_config) = backfill_live_into_provider(
+                        state.db.as_ref(),
+                        &AppType::OpenCode,
+                        &existing,
+                        settings_config,
+                    ) else {
+                        log::warn!("Skipping empty OpenCode live provider '{id}'");
+                        continue;
+                    };
+                    let existing_live_managed = existing
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.live_config_managed);
+                    if existing.settings_config != settings_config
+                        || existing.name != display_name
+                        || existing_live_managed != Some(true)
                     {
                         let mut provider = existing;
                         provider.name = display_name;
                         provider.settings_config = settings_config;
+                        provider
+                            .meta
+                            .get_or_insert_with(Default::default)
+                            .live_config_managed = Some(true);
                         if let Err(e) = state.db.save_provider("opencode", &provider) {
                             log::warn!(
                                 "Failed to update OpenCode provider '{id}' from live config: {e}"
@@ -1818,6 +2048,16 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
         // Create provider
         let display_name = config.name.clone().unwrap_or_else(|| id.clone());
         let mut provider = Provider::with_id(id.clone(), display_name, settings_config, None);
+        let Some(backfilled_settings) = backfill_live_into_provider(
+            state.db.as_ref(),
+            &AppType::OpenCode,
+            &provider,
+            provider.settings_config.clone(),
+        ) else {
+            log::warn!("Skipping empty OpenCode live provider '{id}'");
+            continue;
+        };
+        provider.settings_config = backfilled_settings;
         provider.meta = Some(crate::provider::ProviderMeta {
             live_config_managed: Some(true),
             ..Default::default()
@@ -1876,9 +2116,28 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
         if existing_ids.contains(&id) {
             match state.db.get_provider_by_id(&id, "openclaw") {
                 Ok(Some(existing)) => {
-                    if existing.settings_config != settings_config {
+                    let Some(settings_config) = backfill_live_into_provider(
+                        state.db.as_ref(),
+                        &AppType::OpenClaw,
+                        &existing,
+                        settings_config,
+                    ) else {
+                        log::warn!("Skipping empty OpenClaw live provider '{id}'");
+                        continue;
+                    };
+                    let existing_live_managed = existing
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.live_config_managed);
+                    if existing.settings_config != settings_config
+                        || existing_live_managed != Some(true)
+                    {
                         let mut provider = existing;
                         provider.settings_config = settings_config;
+                        provider
+                            .meta
+                            .get_or_insert_with(Default::default)
+                            .live_config_managed = Some(true);
                         if let Err(e) = state.db.save_provider("openclaw", &provider) {
                             log::warn!(
                                 "Failed to update OpenClaw provider '{id}' from live config: {e}"
@@ -1906,6 +2165,16 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
 
         // Create provider
         let mut provider = Provider::with_id(id.clone(), display_name, settings_config, None);
+        let Some(backfilled_settings) = backfill_live_into_provider(
+            state.db.as_ref(),
+            &AppType::OpenClaw,
+            &provider,
+            provider.settings_config.clone(),
+        ) else {
+            log::warn!("Skipping empty OpenClaw live provider '{id}'");
+            continue;
+        };
+        provider.settings_config = backfilled_settings;
         provider.meta = Some(crate::provider::ProviderMeta {
             live_config_managed: Some(true),
             ..Default::default()
@@ -1951,9 +2220,28 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
         if existing_ids.contains(&name) {
             match state.db.get_provider_by_id(&name, "hermes") {
                 Ok(Some(existing)) => {
-                    if existing.settings_config != config {
+                    let Some(settings_config) = backfill_live_into_provider(
+                        state.db.as_ref(),
+                        &AppType::Hermes,
+                        &existing,
+                        config,
+                    ) else {
+                        log::warn!("Skipping empty Hermes live provider '{name}'");
+                        continue;
+                    };
+                    let existing_live_managed = existing
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.live_config_managed);
+                    if existing.settings_config != settings_config
+                        || existing_live_managed != Some(true)
+                    {
                         let mut provider = existing;
-                        provider.settings_config = config;
+                        provider.settings_config = settings_config;
+                        provider
+                            .meta
+                            .get_or_insert_with(Default::default)
+                            .live_config_managed = Some(true);
                         if let Err(e) = state.db.save_provider("hermes", &provider) {
                             log::warn!(
                                 "Failed to update Hermes provider '{name}' from live config: {e}"
@@ -1974,6 +2262,16 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
 
         // Create provider
         let mut provider = Provider::with_id(name.clone(), name.clone(), config, None);
+        let Some(backfilled_settings) = backfill_live_into_provider(
+            state.db.as_ref(),
+            &AppType::Hermes,
+            &provider,
+            provider.settings_config.clone(),
+        ) else {
+            log::warn!("Skipping empty Hermes live provider '{name}'");
+            continue;
+        };
+        provider.settings_config = backfilled_settings;
         provider.meta = Some(crate::provider::ProviderMeta {
             live_config_managed: Some(true),
             ..Default::default()
@@ -2671,5 +2969,95 @@ base_url = "https://a.example/v1"
 
         assert!(!config_text.contains("mcp_servers"));
         assert!(config_text.contains("model = \"grok-4.5\""));
+    }
+
+    #[test]
+    fn backfill_rejects_empty_live_snapshots() {
+        let db = Database::memory().expect("create memory db");
+        let provider = Provider::with_id(
+            "claude-empty".to_string(),
+            "Claude Empty".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "db-token",
+                    "ANTHROPIC_BASE_URL": "https://example.test"
+                }
+            }),
+            None,
+        );
+
+        assert!(backfill_live_into_provider(&db, &AppType::Claude, &provider, json!({})).is_none());
+        assert!(backfill_live_into_provider(
+            &db,
+            &AppType::Codex,
+            &provider,
+            json!({ "auth": {}, "config": "   " })
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn codex_backfill_preserves_db_auth_when_live_auth_is_missing() {
+        let db = Database::memory().expect("create memory db");
+        let provider = Provider::with_id(
+            "codex-provider".to_string(),
+            "Codex Provider".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "db-key",
+                    "account_id": "db-account"
+                },
+                "config": "model_provider = \"custom\"\n"
+            }),
+            None,
+        );
+
+        let backfilled = backfill_live_into_provider(
+            &db,
+            &AppType::Codex,
+            &provider,
+            json!({
+                "config": "model_provider = \"custom\"\nmodel = \"gpt-5\"\n"
+            }),
+        )
+        .expect("config-only live snapshot is meaningful");
+
+        assert_eq!(backfilled["auth"]["OPENAI_API_KEY"], json!("db-key"));
+        assert_eq!(backfilled["auth"]["account_id"], json!("db-account"));
+        assert_eq!(
+            backfilled["config"],
+            json!("model_provider = \"custom\"\nmodel = \"gpt-5\"\n")
+        );
+    }
+
+    #[test]
+    fn backfill_merges_missing_gemini_env_values_without_overwriting_live_edits() {
+        let db = Database::memory().expect("create memory db");
+        let provider = Provider::with_id(
+            "gemini-provider".to_string(),
+            "Gemini Provider".to_string(),
+            json!({
+                "env": {
+                    "GEMINI_API_KEY": "db-key",
+                    "GEMINI_MODEL": "db-model"
+                },
+                "config": {}
+            }),
+            None,
+        );
+
+        let backfilled = backfill_live_into_provider(
+            &db,
+            &AppType::Gemini,
+            &provider,
+            json!({
+                "env": { "GEMINI_MODEL": "live-model" },
+                "config": { "security": { "auth": "oauth" } }
+            }),
+        )
+        .expect("non-empty Gemini live snapshot");
+
+        assert_eq!(backfilled["env"]["GEMINI_API_KEY"], json!("db-key"));
+        assert_eq!(backfilled["env"]["GEMINI_MODEL"], json!("live-model"));
     }
 }

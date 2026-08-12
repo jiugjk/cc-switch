@@ -9,6 +9,7 @@ import {
   Loader2,
   Zap,
   Power,
+  TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -49,7 +50,7 @@ export function ProxyPanel({
   const isRunning = status?.running ?? false;
 
   // 获取应用接管状态
-  const { data: takeoverStatus } = useProxyTakeoverStatus();
+  const { data: takeoverStatus } = useProxyTakeoverStatus(true, isRunning);
   const setTakeoverForApp = useSetProxyTakeoverForApp();
 
   // 获取全局代理配置
@@ -182,6 +183,20 @@ export function ProxyPanel({
       );
       return;
     }
+
+    const isNonLoopback =
+      normalizedAddress === "0.0.0.0" ||
+      normalizedAddress === "::" ||
+      (isValidIpv4(normalizedAddress) &&
+        !normalizedAddress.startsWith("127.")) ||
+      (isValidIpv6(normalizedAddress) && normalizedAddress !== "::1");
+    if (
+      isNonLoopback &&
+      !window.confirm(t("proxy.settings.nonLoopbackWarning"))
+    ) {
+      return;
+    }
+
     try {
       await updateGlobalConfig.mutateAsync({
         ...globalConfig,
@@ -315,6 +330,16 @@ export function ProxyPanel({
         {/* Running state: service info + stats */}
         {isRunning && status ? (
           <div className="space-y-6">
+            {status.insecure_exposure && (
+              <div
+                role="alert"
+                className="flex items-start gap-3 rounded-md border border-yellow-500/40 bg-yellow-50 p-3 text-sm text-yellow-900 dark:bg-yellow-950/30 dark:text-yellow-100"
+              >
+                <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{t("proxy.settings.nonLoopbackActiveWarning")}</span>
+              </div>
+            )}
+
             {/* [4] Running info: address + current provider */}
             <div className="rounded-lg border border-border bg-muted/40 p-4 space-y-4">
               <div>

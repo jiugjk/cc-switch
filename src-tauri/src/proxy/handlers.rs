@@ -43,7 +43,6 @@ use super::{
     ProxyError,
 };
 use crate::app_config::AppType;
-use crate::database::PRICING_SOURCE_REQUEST;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -130,7 +129,7 @@ pub async fn handle_claude_desktop_messages(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    validate_claude_desktop_gateway_auth(&state, request.headers())?;
+    validate_claude_desktop_gateway_auth(&state, request.headers()).await?;
     handle_messages_for_app(
         state,
         request,
@@ -146,7 +145,7 @@ pub async fn handle_claude_desktop_models(
     State(state): State<ProxyState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, ProxyError> {
-    validate_claude_desktop_gateway_auth(&state, &headers)?;
+    validate_claude_desktop_gateway_auth(&state, &headers).await?;
     let providers = state
         .provider_router
         .select_providers("claude-desktop")
@@ -258,12 +257,10 @@ async fn handle_messages_for_app(
     .await
 }
 
-fn validate_claude_desktop_gateway_auth(
+async fn validate_claude_desktop_gateway_auth(
     state: &ProxyState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(), ProxyError> {
-    let expected = crate::claude_desktop_config::get_or_create_gateway_token(state.db.as_ref())
-        .map_err(|e| ProxyError::AuthError(e.to_string()))?;
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
         return Err(ProxyError::AuthError(
             "Claude Desktop gateway 缺少 Authorization 头".to_string(),
@@ -276,8 +273,14 @@ fn validate_claude_desktop_gateway_auth(
         .strip_prefix("Bearer ")
         .or_else(|| value.strip_prefix("bearer "))
         .unwrap_or("")
-        .trim();
-    if token != expected {
+        .trim()
+        .to_string();
+    let expected = state
+        .db
+        .spawn(crate::claude_desktop_config::get_or_create_gateway_token)
+        .await
+        .map_err(|e| ProxyError::AuthError(e.to_string()))?;
+    if !super::auth_layer::constant_time_token_eq(&token, &expected) {
         return Err(ProxyError::AuthError(
             "Claude Desktop gateway token 无效".to_string(),
         ));
@@ -2812,25 +2815,35 @@ fn log_forward_error(
 ) {
     use super::usage::logger::UsageLogger;
 
-    let logger = UsageLogger::new(&state.db);
     let status_code = map_proxy_error_to_status(error);
     let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
+    let db = state.db.clone();
+    let provider_id = ctx.provider.id.clone();
+    let app_type = ctx.app_type_str.to_string();
+    let model = ctx.request_model.clone();
+    let latency_ms = ctx.latency_ms();
+    let session_id = ctx.session_id.clone();
 
-    if let Err(e) = logger.log_error_with_context(
-        request_id,
-        ctx.provider.id.clone(),
-        ctx.app_type_str.to_string(),
-        ctx.request_model.clone(),
-        status_code,
-        error_message,
-        ctx.latency_ms(),
-        is_streaming,
-        Some(ctx.session_id.clone()),
-        None,
-    ) {
-        log::warn!("记录失败请求日志失败: {e}");
-    }
+    tokio::spawn(async move {
+        if let Err(e) = UsageLogger::log_error_with_context_async(
+            db,
+            request_id,
+            provider_id,
+            app_type,
+            model,
+            status_code,
+            error_message,
+            latency_ms,
+            is_streaming,
+            Some(session_id),
+            None,
+        )
+        .await
+        {
+            log::warn!("记录失败请求日志失败: {e}");
+        }
+    });
 }
 
 /// 记录请求使用量
@@ -2858,35 +2871,27 @@ async fn log_usage(
         return;
     }
 
-    let logger = UsageLogger::new(&state.db);
-
-    let (multiplier, pricing_model_source) =
-        logger.resolve_pricing_config(provider_id, app_type).await;
-    let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
-        outbound_model
-    } else {
-        model
-    };
-
     let dedup_scope = super::usage::parser::dedup_scope_for_app(app_type, provider_id);
     let request_id = usage.dedup_request_id(dedup_scope);
 
-    if let Err(e) = logger.log_with_calculation(
+    if let Err(e) = UsageLogger::log_with_resolved_pricing(
+        state.db.clone(),
         request_id,
         provider_id.to_string(),
         app_type.to_string(),
         model.to_string(),
         request_model.to_string(),
-        pricing_model.to_string(),
+        outbound_model.to_string(),
         usage,
-        multiplier,
         latency_ms,
         first_token_ms,
         status_code,
         session_id,
         None, // provider_type
         is_streaming,
-    ) {
+    )
+    .await
+    {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
 }

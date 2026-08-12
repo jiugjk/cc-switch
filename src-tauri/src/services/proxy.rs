@@ -355,12 +355,14 @@ impl ProxyService {
         let effective_provider = self.claude_provider_with_effective_settings(provider)?;
         let mut effective_settings = effective_provider.settings_config.clone();
         let (proxy_url, _) = self.build_proxy_urls().await?;
+        let takeover_credential = self.takeover_credential().await?;
 
         Self::apply_claude_takeover_fields_for_provider(
             &mut effective_settings,
             &proxy_url,
             &effective_provider,
         );
+        Self::project_takeover_credential(&mut effective_settings, &takeover_credential);
         self.write_claude_live(&effective_settings)?;
         Ok(())
     }
@@ -383,12 +385,14 @@ impl ProxyService {
             )?;
         }
         let (_, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let takeover_credential = self.takeover_credential().await?;
 
         Self::apply_codex_takeover_fields_for_provider(
             &mut effective_settings,
             &proxy_codex_base_url,
             provider,
         )?;
+        Self::project_takeover_credential(&mut effective_settings, &takeover_credential);
 
         self.write_codex_takeover_live_for_provider(&effective_settings, Some(provider))?;
         Ok(())
@@ -407,8 +411,10 @@ impl ProxyService {
         .map_err(|e| format!("构建 Grok Build 有效配置失败: {e}"))?;
         Self::merge_grok_profile_onto_existing_config(&mut effective_settings, &existing_live)?;
         let (proxy_url, _) = self.build_proxy_urls().await?;
+        let takeover_credential = self.takeover_credential().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
         Self::apply_grok_takeover_fields(&mut effective_settings, &proxy_grok_base_url)?;
+        Self::project_takeover_credential(&mut effective_settings, &takeover_credential);
         self.write_grok_live(&effective_settings)
     }
 
@@ -503,13 +509,20 @@ impl ProxyService {
 
     async fn rebuild_grok_takeover_live(&self, direct_config: &str) -> Result<String, String> {
         let (proxy_url, _) = self.build_proxy_urls().await?;
+        let takeover_credential = self.takeover_credential().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
-        crate::grok_config::apply_proxy_takeover(
+        let mut projected = crate::grok_config::apply_proxy_takeover(
             direct_config,
             &proxy_grok_base_url,
             PROXY_TOKEN_PLACEHOLDER,
         )
-        .map_err(|e| format!("重建 Grok Build 接管配置失败: {e}"))
+        .map_err(|e| format!("重建 Grok Build 接管配置失败: {e}"))?;
+        if takeover_credential != PROXY_TOKEN_PLACEHOLDER {
+            let quoted_marker = format!("\"{PROXY_TOKEN_PLACEHOLDER}\"");
+            let quoted_credential = format!("\"{takeover_credential}\"");
+            projected = projected.replace(&quoted_marker, &quoted_credential);
+        }
+        Ok(projected)
     }
 
     /// Save the complete Grok editor draft without allowing it to replace the
@@ -1210,7 +1223,7 @@ impl ProxyService {
                                     .map(|s| (key, s.trim()))
                             })
                             .filter(|(_, token)| {
-                                !token.is_empty() && *token != PROXY_TOKEN_PLACEHOLDER
+                                !token.is_empty() && !Self::is_proxy_takeover_credential(token)
                             });
 
                             if let Some((token_key, token)) = token_pair {
@@ -1302,7 +1315,7 @@ impl ProxyService {
                             .and_then(|v| v.get("OPENAI_API_KEY"))
                             .and_then(|v| v.as_str())
                             .map(|s| s.trim())
-                            .filter(|s| !s.is_empty() && *s != PROXY_TOKEN_PLACEHOLDER)
+                            .filter(|s| !s.is_empty() && !Self::is_proxy_takeover_credential(s))
                         {
                             if let Some(auth_obj) = provider
                                 .settings_config
@@ -1354,7 +1367,7 @@ impl ProxyService {
                             .and_then(|v| v.get("GEMINI_API_KEY"))
                             .and_then(|v| v.as_str())
                             .map(|s| s.trim())
-                            .filter(|s| !s.is_empty() && *s != PROXY_TOKEN_PLACEHOLDER)
+                            .filter(|s| !s.is_empty() && !Self::is_proxy_takeover_credential(s))
                         {
                             if let Some(env_obj) = provider
                                 .settings_config
@@ -1410,7 +1423,7 @@ impl ProxyService {
                         if let Some(token) =
                             crate::grok_config::extract_inline_api_key(live_config_toml)
                         {
-                            if !token.is_empty() && token != PROXY_TOKEN_PLACEHOLDER {
+                            if !token.is_empty() && !Self::is_proxy_takeover_credential(&token) {
                                 if let Some(provider_config) = provider
                                     .settings_config
                                     .get("config")
@@ -1713,6 +1726,62 @@ impl ProxyService {
         Ok((proxy_url, proxy_codex_base_url))
     }
 
+    /// Return the credential a client must present to a non-loopback proxy.
+    ///
+    /// Loopback takeover keeps the historical placeholder so it never exposes
+    /// the gateway token in ordinary local CLI configuration. Once the
+    /// listener is bound to a concrete interface, the same projected config is
+    /// also used by local clients whose peer address is non-loopback; replacing
+    /// the placeholder there is what makes those clients pass the gateway
+    /// middleware without requiring a manual, undocumented header edit.
+    async fn takeover_credential(&self) -> Result<String, String> {
+        let config = self
+            .db
+            .get_proxy_config()
+            .await
+            .map_err(|e| format!("获取代理配置失败: {e}"))?;
+        if crate::proxy::auth_layer::is_non_loopback_bind_address(&config.listen_address) {
+            crate::claude_desktop_config::get_or_create_gateway_token(self.db.as_ref())
+                .map_err(|e| format!("获取代理网关令牌失败: {e}"))
+        } else {
+            Ok(PROXY_TOKEN_PLACEHOLDER.to_string())
+        }
+    }
+
+    /// Replace only exact takeover markers in a projected live snapshot.
+    ///
+    /// The marker is emitted by the existing app-specific writers (including
+    /// TOML strings for Codex/Grok). Replacing exact string values recursively
+    /// lets loopback behavior and all existing cleanup logic remain unchanged,
+    /// while non-loopback listeners get the real gateway credential.
+    fn project_takeover_credential(value: &mut Value, credential: &str) {
+        match value {
+            Value::String(text) if text == PROXY_TOKEN_PLACEHOLDER => {
+                *text = credential.to_string();
+            }
+            Value::String(text) => {
+                // TOML is stored as a string. Only replace the quoted marker
+                // emitted by our writers; arbitrary user prose is untouched.
+                let quoted_marker = format!("\"{PROXY_TOKEN_PLACEHOLDER}\"");
+                let quoted_credential = format!("\"{credential}\"");
+                if text.contains(&quoted_marker) {
+                    *text = text.replace(&quoted_marker, &quoted_credential);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    Self::project_takeover_credential(item, credential);
+                }
+            }
+            Value::Object(object) => {
+                for item in object.values_mut() {
+                    Self::project_takeover_credential(item, credential);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Grok Build live 是否具备可接管的自定义模型表。
     ///
     /// 官方态 live（Grok CLI 自带 OAuth 登录、无 `[model.*]` 表）没有注入
@@ -1754,6 +1823,7 @@ impl ProxyService {
     /// 因此不需要在 URL 中添加应用前缀。
     async fn takeover_live_configs(&self) -> Result<(), String> {
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let takeover_credential = self.takeover_credential().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
 
         // Claude: 修改 ANTHROPIC_BASE_URL，使用占位符替代真实 Token（代理会注入真实 Token）
@@ -1765,6 +1835,7 @@ impl ProxyService {
                 &proxy_url,
                 &claude_provider,
             );
+            Self::project_takeover_credential(&mut live_config, &takeover_credential);
             self.write_claude_live(&live_config)?;
             log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
         }
@@ -1777,6 +1848,7 @@ impl ProxyService {
                 &proxy_codex_base_url,
                 &codex_provider,
             )?;
+            Self::project_takeover_credential(&mut live_config, &takeover_credential);
 
             self.write_codex_takeover_live_for_provider(&live_config, Some(&codex_provider))?;
             log::info!("Codex Live 配置已接管，代理地址: {proxy_codex_base_url}");
@@ -1794,6 +1866,7 @@ impl ProxyService {
                     "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER
                 });
             }
+            Self::project_takeover_credential(&mut live_config, &takeover_credential);
             self.write_gemini_live(&live_config)?;
             log::info!("Gemini Live 配置已接管，代理地址: {proxy_url}");
         }
@@ -1802,6 +1875,7 @@ impl ProxyService {
         if let Ok(mut live_config) = self.read_grok_live() {
             if Self::grok_live_config_supports_takeover(&live_config) {
                 Self::apply_grok_takeover_fields(&mut live_config, &proxy_grok_base_url)?;
+                Self::project_takeover_credential(&mut live_config, &takeover_credential);
                 self.write_grok_live(&live_config)?;
                 log::info!("Grok Build Live 配置已接管，代理地址: {proxy_grok_base_url}");
             } else {
@@ -1815,6 +1889,7 @@ impl ProxyService {
     /// 接管指定应用的 Live 配置（严格模式：目标配置不存在则返回错误）
     async fn takeover_live_config_strict(&self, app_type: &AppType) -> Result<(), String> {
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let takeover_credential = self.takeover_credential().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
 
         match app_type {
@@ -1828,6 +1903,7 @@ impl ProxyService {
                     &proxy_url,
                     &claude_provider,
                 );
+                Self::project_takeover_credential(&mut live_config, &takeover_credential);
                 self.write_claude_live(&live_config)?;
                 log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
             }
@@ -1839,6 +1915,7 @@ impl ProxyService {
                     &proxy_codex_base_url,
                     &codex_provider,
                 )?;
+                Self::project_takeover_credential(&mut live_config, &takeover_credential);
 
                 self.write_codex_takeover_live_for_provider(&live_config, Some(&codex_provider))?;
                 log::info!("Codex Live 配置已接管，代理地址: {proxy_codex_base_url}");
@@ -1856,6 +1933,7 @@ impl ProxyService {
                     });
                 }
 
+                Self::project_takeover_credential(&mut live_config, &takeover_credential);
                 self.write_gemini_live(&live_config)?;
                 log::info!("Gemini Live 配置已接管，代理地址: {proxy_url}");
             }
@@ -1870,6 +1948,7 @@ impl ProxyService {
                     );
                 }
                 Self::apply_grok_takeover_fields(&mut live_config, &proxy_grok_base_url)?;
+                Self::project_takeover_credential(&mut live_config, &takeover_credential);
                 self.write_grok_live(&live_config)?;
                 log::info!("Grok Build Live 配置已接管，代理地址: {proxy_grok_base_url}");
             }
@@ -1882,6 +1961,7 @@ impl ProxyService {
     /// 接管指定应用的 Live 配置（尽力而为：配置不存在/读取失败则跳过）
     async fn takeover_live_config_best_effort(&self, app_type: &AppType) -> Result<(), String> {
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let takeover_credential = self.takeover_credential().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
 
         match app_type {
@@ -1905,6 +1985,7 @@ impl ProxyService {
                             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
                         );
                     }
+                    Self::project_takeover_credential(&mut live_config, &takeover_credential);
                     let _ = self.write_claude_live(&live_config);
                 }
             }
@@ -1916,6 +1997,7 @@ impl ProxyService {
                         &proxy_codex_base_url,
                         &codex_provider,
                     )?;
+                    Self::project_takeover_credential(&mut live_config, &takeover_credential);
 
                     self.write_codex_takeover_live_for_provider(
                         &live_config,
@@ -1935,6 +2017,7 @@ impl ProxyService {
                         });
                     }
 
+                    Self::project_takeover_credential(&mut live_config, &takeover_credential);
                     let _ = self.write_gemini_live(&live_config);
                 }
             }
@@ -1942,6 +2025,7 @@ impl ProxyService {
                 if let Ok(mut live_config) = self.read_grok_live() {
                     if Self::grok_live_config_supports_takeover(&live_config) {
                         Self::apply_grok_takeover_fields(&mut live_config, &proxy_grok_base_url)?;
+                        Self::project_takeover_credential(&mut live_config, &takeover_credential);
                         let _ = self.write_grok_live(&live_config);
                     } else {
                         log::info!(
@@ -2284,13 +2368,24 @@ impl ProxyService {
             return Ok(());
         };
 
-        for key in [
+        let credential_keys = [
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
             "OPENROUTER_API_KEY",
             "OPENAI_API_KEY",
-        ] {
-            if env.get(key).and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER) {
+        ];
+        let has_takeover_credential = credential_keys.iter().any(|key| {
+            env.get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(Self::is_proxy_takeover_credential)
+        });
+
+        for key in credential_keys {
+            if env
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(Self::is_proxy_takeover_credential)
+            {
                 env.remove(key);
             }
         }
@@ -2298,8 +2393,7 @@ impl ProxyService {
         if env
             .get("ANTHROPIC_BASE_URL")
             .and_then(|v| v.as_str())
-            .map(Self::is_local_proxy_url)
-            .unwrap_or(false)
+            .is_some_and(|url| has_takeover_credential || Self::is_local_proxy_url(url))
         {
             env.remove("ANTHROPIC_BASE_URL");
         }
@@ -2312,17 +2406,27 @@ impl ProxyService {
         let mut config = self.read_codex_live()?;
 
         if let Some(auth) = config.get_mut("auth").and_then(|v| v.as_object_mut()) {
-            if auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
+            if auth
+                .get("OPENAI_API_KEY")
+                .and_then(|v| v.as_str())
+                .is_some_and(Self::is_proxy_takeover_credential)
             {
                 auth.remove("OPENAI_API_KEY");
             }
         }
 
         if let Some(cfg_str) = config.get("config").and_then(|v| v.as_str()) {
-            let updated = Self::remove_local_toml_base_url(cfg_str);
+            let config_has_takeover_credential =
+                crate::codex_config::extract_codex_experimental_bearer_token(cfg_str)
+                    .as_deref()
+                    .is_some_and(Self::is_proxy_takeover_credential)
+                    || crate::codex_config::codex_config_has_official_proxy_route(cfg_str);
+            let updated = crate::codex_config::remove_codex_toml_base_url_if(cfg_str, |url| {
+                config_has_takeover_credential || Self::is_local_proxy_url(url)
+            });
             let updated =
                 crate::codex_config::remove_codex_experimental_bearer_token_if(&updated, |token| {
-                    token == PROXY_TOKEN_PLACEHOLDER
+                    Self::is_proxy_takeover_credential(token)
                 })
                 .map_err(|e| format!("清理 Codex 接管占位符失败: {e}"))?;
             let updated = crate::codex_config::remove_codex_official_proxy_route(&updated)
@@ -2334,11 +2438,6 @@ impl ProxyService {
         Ok(())
     }
 
-    /// Remove local proxy base_url from TOML（委托给 codex_config 共享实现）
-    fn remove_local_toml_base_url(toml_str: &str) -> String {
-        crate::codex_config::remove_codex_toml_base_url_if(toml_str, Self::is_local_proxy_url)
-    }
-
     fn cleanup_gemini_takeover_placeholders_in_live(&self) -> Result<(), String> {
         let mut config = self.read_gemini_live()?;
 
@@ -2346,15 +2445,18 @@ impl ProxyService {
             return Ok(());
         };
 
-        if env.get("GEMINI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER) {
+        let has_takeover_credential = env
+            .get("GEMINI_API_KEY")
+            .and_then(|v| v.as_str())
+            .is_some_and(Self::is_proxy_takeover_credential);
+        if has_takeover_credential {
             env.remove("GEMINI_API_KEY");
         }
 
         if env
             .get("GOOGLE_GEMINI_BASE_URL")
             .and_then(|v| v.as_str())
-            .map(Self::is_local_proxy_url)
-            .unwrap_or(false)
+            .is_some_and(|url| has_takeover_credential || Self::is_local_proxy_url(url))
         {
             env.remove("GOOGLE_GEMINI_BASE_URL");
         }
@@ -2368,7 +2470,10 @@ impl ProxyService {
         let Some(config_toml) = config.get("config").and_then(Value::as_str) else {
             return Ok(());
         };
-        if !crate::grok_config::has_proxy_placeholder(config_toml, PROXY_TOKEN_PLACEHOLDER) {
+        if !crate::grok_config::has_proxy_credential(
+            config_toml,
+            Self::is_proxy_takeover_credential,
+        ) {
             return Ok(());
         }
 
@@ -2376,9 +2481,9 @@ impl ProxyService {
         // Clear takeover-owned fields from every profile and the shared endpoint;
         // leaving even one secondary model on localhost keeps the broken takeover
         // detectable and can route subagent traffic to a stopped proxy.
-        let updated = crate::grok_config::remove_proxy_takeover_fields(
+        let updated = crate::grok_config::remove_proxy_takeover_fields_if(
             config_toml,
-            PROXY_TOKEN_PLACEHOLDER,
+            Self::is_proxy_takeover_credential,
             Self::is_local_proxy_url,
         )
         .map_err(|e| format!("清理 Grok Build 接管占位符失败: {e}"))?;
@@ -2448,6 +2553,20 @@ impl ProxyService {
         false
     }
 
+    /// Recognize both the legacy marker and generated gateway tokens without
+    /// reading the token setting. The exact `ccs-` + UUID-simple shape avoids
+    /// treating ordinary provider credentials as takeover-owned data while
+    /// still permitting crash recovery if the settings row is unavailable.
+    fn is_proxy_takeover_credential(value: &str) -> bool {
+        let value = value.trim();
+        if value == PROXY_TOKEN_PLACEHOLDER {
+            return true;
+        }
+        value.strip_prefix("ccs-").is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    }
+
     fn is_claude_live_taken_over(config: &Value) -> bool {
         let env = match config.get("env").and_then(|v| v.as_object()) {
             Some(env) => env,
@@ -2460,7 +2579,11 @@ impl ProxyService {
             "OPENROUTER_API_KEY",
             "OPENAI_API_KEY",
         ] {
-            if env.get(key).and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER) {
+            if env
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(Self::is_proxy_takeover_credential)
+            {
                 return true;
             }
         }
@@ -2474,7 +2597,7 @@ impl ProxyService {
             .and_then(|v| v.as_object())
             .and_then(|auth| auth.get("OPENAI_API_KEY"))
             .and_then(|v| v.as_str())
-            == Some(PROXY_TOKEN_PLACEHOLDER)
+            .is_some_and(Self::is_proxy_takeover_credential)
         {
             return true;
         }
@@ -2484,7 +2607,7 @@ impl ProxyService {
             .and_then(|v| v.as_str())
             .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
             .as_deref()
-            == Some(PROXY_TOKEN_PLACEHOLDER)
+            .is_some_and(Self::is_proxy_takeover_credential)
     }
 
     fn is_codex_live_taken_over(config: &Value) -> bool {
@@ -2500,7 +2623,9 @@ impl ProxyService {
             Some(env) => env,
             None => return false,
         };
-        env.get("GEMINI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
+        env.get("GEMINI_API_KEY")
+            .and_then(|v| v.as_str())
+            .is_some_and(Self::is_proxy_takeover_credential)
     }
 
     fn is_grok_live_taken_over(config: &Value) -> bool {
@@ -2508,7 +2633,10 @@ impl ProxyService {
             .get("config")
             .and_then(Value::as_str)
             .is_some_and(|config_toml| {
-                crate::grok_config::has_proxy_placeholder(config_toml, PROXY_TOKEN_PLACEHOLDER)
+                crate::grok_config::has_proxy_credential(
+                    config_toml,
+                    Self::is_proxy_takeover_credential,
+                )
             })
     }
 
@@ -3081,8 +3209,10 @@ impl ProxyService {
                     config.get("auth"),
                     config.get("config").and_then(|v| v.as_str()),
                 ) {
-                    if auth.get("OPENAI_API_KEY").and_then(|v| v.as_str())
-                        == Some(PROXY_TOKEN_PLACEHOLDER)
+                    if auth
+                        .get("OPENAI_API_KEY")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(Self::is_proxy_takeover_credential)
                     {
                         let live_config = crate::codex_config::prepare_codex_provider_live_config(
                             auth, config_str,
@@ -3115,7 +3245,9 @@ impl ProxyService {
     }
 
     fn codex_auth_has_proxy_placeholder(auth: &Value) -> bool {
-        auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
+        auth.get("OPENAI_API_KEY")
+            .and_then(|v| v.as_str())
+            .is_some_and(Self::is_proxy_takeover_credential)
     }
 
     fn write_codex_takeover_live_for_provider(
@@ -3499,6 +3631,57 @@ mod tests {
     async fn running_codex_base_url(service: &ProxyService) -> String {
         let status = service.get_status().await.expect("get proxy status");
         format!("http://127.0.0.1:{}/v1", status.port)
+    }
+
+    #[test]
+    fn takeover_credential_recognition_is_exact() {
+        assert!(ProxyService::is_proxy_takeover_credential(
+            PROXY_TOKEN_PLACEHOLDER
+        ));
+        assert!(ProxyService::is_proxy_takeover_credential(
+            "ccs-0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!ProxyService::is_proxy_takeover_credential(
+            "ccs-0123456789abcdef"
+        ));
+        assert!(!ProxyService::is_proxy_takeover_credential(
+            "sk-0123456789abcdef0123456789abcdef"
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_loopback_takeover_projects_real_gateway_credential() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let mut proxy_config = db.get_proxy_config().await.expect("read proxy config");
+        proxy_config.listen_address = "192.168.50.20".to_string();
+        db.update_proxy_config(proxy_config)
+            .await
+            .expect("set non-loopback listener");
+
+        let credential = service
+            .takeover_credential()
+            .await
+            .expect("get takeover credential");
+        assert!(ProxyService::is_proxy_takeover_credential(&credential));
+        assert_ne!(credential, PROXY_TOKEN_PLACEHOLDER);
+
+        let mut projected = json!({
+            "env": { "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER },
+            "config": "experimental_bearer_token = \"PROXY_MANAGED\"\n"
+        });
+        ProxyService::project_takeover_credential(&mut projected, &credential);
+        assert_eq!(
+            projected
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(Value::as_str),
+            Some(credential.as_str())
+        );
+        assert!(projected["config"]
+            .as_str()
+            .is_some_and(|text| text.contains(&credential)));
+        assert!(ProxyService::is_claude_live_taken_over(&projected));
+        assert!(ProxyService::is_codex_live_taken_over(&projected));
     }
 
     fn seed_codex_model_template() {
@@ -5099,9 +5282,9 @@ model = "deepseek-v4-flash"
 
 [model_providers.deepseek]
 name = "DeepSeek"
-base_url = "http://127.0.0.1:15721/v1"
+base_url = "http://192.168.50.20:15721/v1"
 wire_api = "responses"
-experimental_bearer_token = "PROXY_MANAGED"
+experimental_bearer_token = "ccs-0123456789abcdef0123456789abcdef"
 "#,
             ),
         )
@@ -5127,12 +5310,61 @@ experimental_bearer_token = "PROXY_MANAGED"
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read live config");
         assert!(
-            !live_config.contains(PROXY_TOKEN_PLACEHOLDER),
-            "cleanup should remove config.toml proxy bearer placeholder"
+            !live_config.contains("ccs-0123456789abcdef0123456789abcdef"),
+            "cleanup should remove the projected gateway token"
         );
         assert!(
-            !live_config.contains("http://127.0.0.1:15721"),
-            "cleanup should remove local proxy base_url"
+            !live_config.contains("http://192.168.50.20:15721"),
+            "cleanup should remove a concrete non-loopback proxy base_url"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn non_loopback_cleanup_removes_claude_and_gemini_owned_urls() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+        let credential = "ccs-0123456789abcdef0123456789abcdef";
+
+        service
+            .write_claude_live(&json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": credential,
+                    "ANTHROPIC_BASE_URL": "http://192.168.50.20:15721",
+                    "KEEP": "value"
+                }
+            }))
+            .expect("seed Claude takeover");
+        service
+            .cleanup_claude_takeover_placeholders_in_live()
+            .expect("clean Claude takeover");
+        let claude = service.read_claude_live().expect("read Claude live");
+        assert!(claude.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(claude.pointer("/env/ANTHROPIC_BASE_URL").is_none());
+        assert_eq!(
+            claude.pointer("/env/KEEP").and_then(Value::as_str),
+            Some("value")
+        );
+
+        service
+            .write_gemini_live(&json!({
+                "env": {
+                    "GEMINI_API_KEY": credential,
+                    "GOOGLE_GEMINI_BASE_URL": "http://192.168.50.20:15721",
+                    "KEEP": "value"
+                }
+            }))
+            .expect("seed Gemini takeover");
+        service
+            .cleanup_gemini_takeover_placeholders_in_live()
+            .expect("clean Gemini takeover");
+        let gemini = service.read_gemini_live().expect("read Gemini live");
+        assert!(gemini.pointer("/env/GEMINI_API_KEY").is_none());
+        assert!(gemini.pointer("/env/GOOGLE_GEMINI_BASE_URL").is_none());
+        assert_eq!(
+            gemini.pointer("/env/KEEP").and_then(Value::as_str),
+            Some("value")
         );
     }
 

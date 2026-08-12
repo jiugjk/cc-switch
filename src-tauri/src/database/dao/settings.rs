@@ -135,6 +135,32 @@ impl Database {
         }
     }
 
+    /// Persist a common-config snippet only when it carries meaningful data.
+    ///
+    /// Empty extraction results are represented by deleting the setting row,
+    /// rather than storing `""`/`"{}"` (which would permanently disable the
+    /// startup auto-extraction path).  Callers that are merely observing an
+    /// untrusted live snapshot should validate it before invoking this helper.
+    pub fn set_config_snippet_if_meaningful(
+        &self,
+        app_type: &str,
+        snippet: Option<String>,
+    ) -> Result<bool, AppError> {
+        let Some(snippet) = snippet else {
+            self.set_config_snippet(app_type, None)?;
+            return Ok(false);
+        };
+
+        let trimmed = snippet.trim();
+        if trimmed.is_empty() || trimmed == "{}" {
+            self.set_config_snippet(app_type, None)?;
+            return Ok(false);
+        }
+
+        self.set_config_snippet(app_type, Some(snippet))?;
+        Ok(true)
+    }
+
     // --- 全局出站代理 ---
 
     /// 全局代理 URL 的存储键名
@@ -348,5 +374,39 @@ impl Database {
         let json = serde_json::to_string(config)
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_snippet_if_meaningful_never_stores_empty_sentinels() {
+        let db = Database::memory().expect("create memory database");
+        db.set_config_snippet(
+            "claude",
+            Some(r#"{ "includeCoAuthoredBy": false }"#.to_string()),
+        )
+        .expect("seed snippet");
+
+        assert!(!db
+            .set_config_snippet_if_meaningful("claude", Some("{}".to_string()))
+            .expect("clear empty snippet"));
+        assert!(db
+            .get_config_snippet("claude")
+            .expect("read snippet")
+            .is_none());
+
+        assert!(db
+            .set_config_snippet_if_meaningful(
+                "claude",
+                Some(r#"{ "includeCoAuthoredBy": true }"#.to_string()),
+            )
+            .expect("save meaningful snippet"));
+        assert!(db
+            .get_config_snippet("claude")
+            .expect("read meaningful snippet")
+            .is_some());
     }
 }

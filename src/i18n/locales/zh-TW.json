@@ -849,7 +849,6 @@
     "officialWebsite": "官方網站",
     "github": "GitHub",
     "manualInstallCommands": "手動安裝指令",
-    "oneClickInstall": "一鍵安裝",
     "oneClickInstallHint": "安裝或更新 Claude Code / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes",
     "localEnvCheck": "本地環境檢查",
     "updateAllTools": "全部更新（{{count}}）",
@@ -2553,6 +2552,8 @@
     "configDetails": "設定詳情",
     "configUrl": "設定檔 URL",
     "configMergeError": "合併設定檔失敗",
+    "configPreviewTooLarge": "設定內容過大，無法安全預覽（上限 64 KiB）。匯入前請仔細確認來源。",
+    "configPreviewUnavailable": "設定無法解析，暫時無法預覽。匯入前請仔細確認來源。",
     "primaryEndpoint": "主",
     "mcp": {
       "title": "批次匯入 MCP Servers",
@@ -2742,6 +2743,8 @@
       },
       "invalidPort": "連接埠無效，請輸入 1024-65535 之間的數字",
       "invalidAddress": "位址無效，請輸入 IPv4（如 127.0.0.1）、IPv6（如 ::1）或 localhost",
+      "nonLoopbackWarning": "此位址會將憑證代理暴露給同一網路中的其他裝置。遠端請求必須攜帶閘道權杖，但仍應只在受信任網路中使用。確定儲存此位址嗎？",
+      "nonLoopbackActiveWarning": "代理服務目前可由同一網路中的其他裝置存取。遠端請求受閘道權杖保護；請妥善保管權杖，並只在受信任網路中使用。",
       "configSaved": "路由設定已儲存",
       "configSaveFailed": "儲存設定失敗",
       "restartRequired": "修改位址或連接埠後需要重新啟動路由服務才能生效"

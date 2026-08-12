@@ -588,7 +588,12 @@ pub fn update_api_key(config_toml: &str, api_key: &str) -> Result<String, AppErr
     update_selected_model_string(config_toml, "api_key", api_key)
 }
 
+#[allow(dead_code)]
 pub fn has_proxy_placeholder(config_toml: &str, token_placeholder: &str) -> bool {
+    has_proxy_credential(config_toml, |api_key| api_key == token_placeholder)
+}
+
+pub fn has_proxy_credential(config_toml: &str, is_proxy_credential: impl Fn(&str) -> bool) -> bool {
     config_toml
         .parse::<toml::Value>()
         .ok()
@@ -604,7 +609,7 @@ pub fn has_proxy_placeholder(config_toml: &str, token_placeholder: &str) -> bool
                     .as_table()
                     .and_then(|table| table.get("api_key"))
                     .and_then(toml::Value::as_str)
-                    .is_some_and(|api_key| api_key == token_placeholder)
+                    .is_some_and(&is_proxy_credential)
             })
         })
 }
@@ -612,12 +617,26 @@ pub fn has_proxy_placeholder(config_toml: &str, token_placeholder: &str) -> bool
 /// Emergency cleanup used only when both the takeover restore backup and the
 /// provider SSOT are unavailable. Remove every field owned by takeover so no
 /// model can keep using a dead local route or the synthetic credential.
+#[allow(dead_code)]
 pub fn remove_proxy_takeover_fields(
     config_toml: &str,
     token_placeholder: &str,
     is_proxy_url: impl Fn(&str) -> bool,
 ) -> Result<String, AppError> {
+    remove_proxy_takeover_fields_if(
+        config_toml,
+        |api_key| api_key == token_placeholder,
+        is_proxy_url,
+    )
+}
+
+pub fn remove_proxy_takeover_fields_if(
+    config_toml: &str,
+    is_proxy_credential: impl Fn(&str) -> bool,
+    is_proxy_url: impl Fn(&str) -> bool,
+) -> Result<String, AppError> {
     let mut document = parse_edit_document(config_toml)?;
+    let mut has_takeover_credential = false;
     if let Some(models) = document
         .get_mut("model")
         .and_then(toml_edit::Item::as_table_like_mut)
@@ -626,13 +645,18 @@ pub fn remove_proxy_takeover_fields(
             let Some(model) = item.as_table_like_mut() else {
                 continue;
             };
-            if model.get("api_key").and_then(toml_edit::Item::as_str) == Some(token_placeholder) {
+            let model_has_takeover_credential = model
+                .get("api_key")
+                .and_then(toml_edit::Item::as_str)
+                .is_some_and(&is_proxy_credential);
+            has_takeover_credential |= model_has_takeover_credential;
+            if model_has_takeover_credential {
                 model.remove("api_key");
             }
             if model
                 .get("base_url")
                 .and_then(toml_edit::Item::as_str)
-                .is_some_and(&is_proxy_url)
+                .is_some_and(|url| model_has_takeover_credential || is_proxy_url(url))
             {
                 model.remove("base_url");
             }
@@ -646,7 +670,7 @@ pub fn remove_proxy_takeover_fields(
             if endpoints
                 .get("models_base_url")
                 .and_then(toml_edit::Item::as_str)
-                .is_some_and(&is_proxy_url)
+                .is_some_and(|url| has_takeover_credential || is_proxy_url(url))
             {
                 endpoints.remove("models_base_url");
             }
@@ -1130,6 +1154,49 @@ context_window = 500000
         }
         assert!(document.get("endpoints").is_none());
         assert!(!has_proxy_placeholder(&cleaned, "PROXY_MANAGED"));
+    }
+
+    #[test]
+    fn emergency_cleanup_removes_owned_remote_url_but_keeps_other_models() {
+        let config = r#"[models]
+default = "owned"
+
+[model.owned]
+model = "owned"
+base_url = "http://192.168.50.20:15721/grokbuild/v1"
+name = "Owned"
+api_key = "ccs-0123456789abcdef0123456789abcdef"
+api_backend = "responses"
+context_window = 128000
+
+[model.user]
+model = "user"
+base_url = "https://user.example/v1"
+name = "User"
+api_key = "user-secret"
+api_backend = "responses"
+context_window = 128000
+
+[endpoints]
+models_base_url = "http://192.168.50.20:15721/grokbuild/v1"
+"#;
+
+        let cleaned =
+            remove_proxy_takeover_fields_if(config, |value| value.starts_with("ccs-"), |_| false)
+                .expect("clean remote takeover fields");
+        let document = cleaned.parse::<toml::Value>().expect("cleaned TOML");
+        let owned = document["model"]["owned"].as_table().expect("owned model");
+        assert!(!owned.contains_key("api_key"));
+        assert!(!owned.contains_key("base_url"));
+        assert_eq!(
+            document["model"]["user"]["api_key"].as_str(),
+            Some("user-secret")
+        );
+        assert_eq!(
+            document["model"]["user"]["base_url"].as_str(),
+            Some("https://user.example/v1")
+        );
+        assert!(document.get("endpoints").is_none());
     }
 
     #[test]

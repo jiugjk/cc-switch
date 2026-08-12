@@ -7,9 +7,27 @@ export interface ParsedDeepLinkConfig {
   type: "claude" | "codex" | "gemini" | "grokbuild" | "generic";
   env?: Record<string, string>;
   auth?: Record<string, string>;
-  tomlConfig?: string;
-  configText?: string;
+  tomlConfig?: string | null;
+  configText?: string | null;
+  /** The payload was intentionally not parsed because it exceeds the preview budget. */
+  oversized?: boolean;
 }
+
+/**
+ * Keep synchronous parsing on the confirmation-dialog path bounded. This is a
+ * preview limit only; the backend still receives the original payload after
+ * the user confirms the import.
+ */
+export const MAX_PREVIEW_CONFIG_BYTES = 64 * 1024;
+const MAX_PREVIEW_BASE64_CHARS =
+  Math.ceil(MAX_PREVIEW_CONFIG_BYTES / 3) * 4 + 4;
+
+const utf8ByteLength = (value: string): number =>
+  new TextEncoder().encode(value).byteLength;
+
+const exceedsPreviewLimit = (value: string): boolean =>
+  value.length > MAX_PREVIEW_CONFIG_BYTES ||
+  utf8ByteLength(value) > MAX_PREVIEW_CONFIG_BYTES;
 
 const maskStructuredSecrets = (
   value: unknown,
@@ -47,8 +65,22 @@ export function parseDeepLinkConfigPreview(
   if (!request.config) return null;
 
   try {
+    // A valid Base64 encoding of a 64 KiB payload cannot exceed this bound.
+    // Reject clearly oversized links before decoding them into another large
+    // string; the exact UTF-8 byte check below handles the boundary cases.
+    if (request.config.length > MAX_PREVIEW_BASE64_CHARS) {
+      return { type: "generic", configText: null, oversized: true };
+    }
+
     const decoded = decodeBase64Utf8(request.config);
     const format = request.configFormat?.trim().toLowerCase();
+
+    // Check before invoking either TOML or JSON parsing. `config` is supplied
+    // by an untrusted deep link and a very large synchronous parse would block
+    // the WebView before the user can reject the import.
+    if (exceedsPreviewLimit(decoded)) {
+      return { type: "generic", configText: null, oversized: true };
+    }
 
     if (request.app === "grokbuild" && format === "toml") {
       return {
@@ -73,6 +105,14 @@ export function parseDeepLinkConfigPreview(
     }
     if (request.app === "codex") {
       const config = typeof parsed.config === "string" ? parsed.config : "";
+      if (config && exceedsPreviewLimit(config)) {
+        return {
+          type: "codex",
+          auth: (parsed.auth as Record<string, string>) || {},
+          tomlConfig: null,
+          oversized: true,
+        };
+      }
       return {
         type: "codex",
         auth: (parsed.auth as Record<string, string>) || {},
@@ -90,14 +130,21 @@ export function parseDeepLinkConfigPreview(
         typeof parsed.config === "string"
           ? parsed.config
           : stringifyToml(parsed);
+      if (exceedsPreviewLimit(config)) {
+        return { type: "grokbuild", tomlConfig: null, oversized: true };
+      }
       return {
         type: "grokbuild",
         tomlConfig: sanitizeTomlForPreview(config),
       };
     }
+    const configText = JSON.stringify(maskStructuredSecrets(parsed), null, 2);
+    if (typeof configText === "string" && exceedsPreviewLimit(configText)) {
+      return { type: "generic", configText: null, oversized: true };
+    }
     return {
       type: "generic",
-      configText: JSON.stringify(maskStructuredSecrets(parsed), null, 2),
+      configText,
     };
   } catch (error) {
     console.error("Failed to parse deep link config preview:", error);

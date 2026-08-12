@@ -2552,6 +2552,8 @@
     "configDetails": "配置详情",
     "configUrl": "配置文件 URL",
     "configMergeError": "合并配置文件失败",
+    "configPreviewTooLarge": "配置内容过大，无法安全预览（上限 64 KiB）。导入前请仔细核对来源。",
+    "configPreviewUnavailable": "配置无法解析，暂时无法预览。导入前请仔细核对来源。",
     "primaryEndpoint": "主",
     "mcp": {
       "title": "批量导入 MCP Servers",
@@ -2741,6 +2743,8 @@
       },
       "invalidPort": "端口无效，请输入 1024-65535 之间的数字",
       "invalidAddress": "地址无效，请输入 IPv4（如 127.0.0.1）、IPv6（如 ::1）或 localhost",
+      "nonLoopbackWarning": "该地址会把凭证代理暴露给同一网络中的其他设备。远程请求必须携带网关令牌，但仍应仅在受信任网络中使用。确定保存此地址吗？",
+      "nonLoopbackActiveWarning": "代理服务当前可被同一网络中的其他设备访问。远程请求受网关令牌保护；请妥善保管令牌，并仅在受信任网络中使用。",
       "configSaved": "路由配置已保存",
       "configSaveFailed": "保存配置失败",
       "restartRequired": "修改地址或端口后需要重启路由服务才能生效"

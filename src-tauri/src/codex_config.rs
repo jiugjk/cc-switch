@@ -227,18 +227,10 @@ pub fn write_codex_live_atomic(
     let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
 
-    if let Some(parent) = auth_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
-    // 读取旧内容用于回滚
+    // 写入顺序固定为 auth -> config；第二步失败时只需恢复第一步的
+    // auth.json，尚未成功替换的 config.toml 无需额外回滚。
     let old_auth = if auth_path.exists() {
         Some(fs::read(&auth_path).map_err(|e| AppError::io(&auth_path, e))?)
-    } else {
-        None
-    };
-    let _old_config = if config_path.exists() {
-        Some(fs::read(&config_path).map_err(|e| AppError::io(&config_path, e))?)
     } else {
         None
     };
@@ -2509,6 +2501,42 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn write_codex_live_atomic_creates_private_directory_and_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _settings = crate::settings::test_support::AmbientSettings::pin("{}");
+        write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "test-key" }),
+            Some("model = \"gpt-5\"\n"),
+        )
+        .expect("write Codex live files");
+
+        let dir = get_codex_config_dir();
+        assert_eq!(
+            std::fs::metadata(&dir)
+                .expect("read Codex directory")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        for path in [get_codex_auth_path(), get_codex_config_path()] {
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("read Codex live file")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "{} must be owner-readable only",
+                path.display()
+            );
+        }
+    }
 
     #[test]
     fn catalog_tool_profile_from_api_format() {

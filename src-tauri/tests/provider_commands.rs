@@ -207,9 +207,9 @@ experimental_bearer_token = "live-key"
         .expect("get codex providers after import");
     let provider = providers.get("default").expect("default provider exists");
     assert_eq!(
-        provider.settings_config.pointer("/auth"),
-        Some(&json!({})),
-        "missing auth.json should import as an empty auth object"
+        provider.settings_config.pointer("/auth/OPENAI_API_KEY"),
+        Some(&json!("live-key")),
+        "config.toml credentials must survive when auth.json is missing"
     );
     assert!(
         provider
@@ -217,7 +217,7 @@ experimental_bearer_token = "live-key"
             .get("config")
             .and_then(|value| value.as_str())
             .unwrap_or_default()
-            .contains("experimental_bearer_token"),
+            .contains("model_providers.aihubmix"),
         "config.toml content should still be imported"
     );
 }

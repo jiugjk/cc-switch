@@ -31,9 +31,10 @@ pub use live::{
 // Internal re-exports (pub(crate))
 pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
-    build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
-    provider_exists_in_live_config, strip_common_config_from_live_settings,
-    sync_current_provider_for_app_to_live, write_live_with_common_config,
+    backfill_live_into_provider, build_effective_settings_with_common_config,
+    live_settings_have_content, normalize_provider_common_config_for_storage,
+    provider_exists_in_live_config, sync_current_provider_for_app_to_live,
+    write_live_with_common_config,
 };
 
 // Internal re-exports
@@ -294,8 +295,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        #[cfg(windows)]
+        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
         std::env::set_var("HOME", temp.path());
+        std::env::set_var("USERPROFILE", temp.path());
+        #[cfg(windows)]
+        std::env::set_var("LOCALAPPDATA", temp.path().join("AppData").join("Local"));
 
         let db = Arc::new(Database::memory().expect("in-memory database"));
         let state = AppState::new(db);
@@ -308,6 +315,15 @@ mod tests {
         match old_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match old_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        #[cfg(windows)]
+        match old_local_app_data {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
         }
 
         result
@@ -501,6 +517,191 @@ mod tests {
             "omo-slim" => crate::services::omo::SLIM.preferred_filename,
             other => panic!("unexpected OMO category in test: {other}"),
         })
+    }
+
+    #[test]
+    #[serial]
+    fn snippet_sync_does_not_replace_existing_value_with_empty_extraction() {
+        with_test_home(|state, _| {
+            state
+                .db
+                .set_config_snippet(
+                    AppType::Claude.as_str(),
+                    Some(r#"{ "includeCoAuthoredBy": false }"#.to_string()),
+                )
+                .expect("seed common config snippet");
+            let mut provider = Provider::with_id(
+                "claude-current".to_string(),
+                "Claude Current".to_string(),
+                json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "db-token" } }),
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                common_config_enabled: Some(true),
+                ..Default::default()
+            });
+            let mut result = SwitchResult::default();
+
+            ProviderService::sync_common_config_snippet_from_live(
+                state,
+                &AppType::Claude,
+                &provider,
+                &json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "live-token" } }),
+                &mut result,
+            );
+
+            assert_eq!(
+                state
+                    .db
+                    .get_config_snippet(AppType::Claude.as_str())
+                    .expect("read common config snippet")
+                    .as_deref(),
+                Some(r#"{ "includeCoAuthoredBy": false }"#)
+            );
+            assert!(result.warnings.is_empty());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn additive_update_restores_live_managed_provider_after_live_file_disappears() {
+        with_test_home(|state, _| {
+            let mut provider = opencode_provider("managed-opencode");
+            provider.meta = Some(ProviderMeta {
+                live_config_managed: Some(true),
+                ..Default::default()
+            });
+            state
+                .db
+                .save_provider(AppType::OpenCode.as_str(), &provider)
+                .expect("seed managed provider");
+
+            let mut edited = provider.clone();
+            edited.name = "Managed OpenCode Edited".to_string();
+            edited.meta = Some(ProviderMeta {
+                live_config_managed: Some(false),
+                ..Default::default()
+            });
+            ProviderService::update(state, AppType::OpenCode, None, edited)
+                .expect("update managed provider after live reset");
+
+            let live = crate::opencode_config::get_providers().expect("read restored live config");
+            assert!(live.contains_key(&provider.id));
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
+                .expect("query provider")
+                .expect("provider exists");
+            assert_eq!(
+                saved
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.live_config_managed),
+                Some(true)
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn startup_opencode_import_preserves_db_key_when_live_key_is_empty() {
+        with_test_home(|state, _| {
+            let mut provider = opencode_provider("opencode-empty-key");
+            provider.meta = Some(ProviderMeta {
+                live_config_managed: Some(true),
+                ..Default::default()
+            });
+            state
+                .db
+                .save_provider(AppType::OpenCode.as_str(), &provider)
+                .expect("seed provider");
+
+            let mut live = provider.settings_config.clone();
+            live["options"]["apiKey"] = json!("");
+            live["models"]["gpt-4o"]["name"] = json!("GPT-4o Live");
+            crate::opencode_config::set_provider(&provider.id, live).expect("seed live provider");
+
+            assert_eq!(
+                import_opencode_providers_from_live(state).expect("import live providers"),
+                1
+            );
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
+                .expect("query provider")
+                .expect("provider exists");
+            assert_eq!(
+                saved.settings_config["options"]["apiKey"],
+                json!("test-key")
+            );
+            assert_eq!(
+                saved.settings_config["models"]["gpt-4o"]["name"],
+                json!("GPT-4o Live")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn startup_openclaw_and_hermes_imports_preserve_empty_live_keys() {
+        with_test_home(|state, _| {
+            let mut openclaw = openclaw_provider("openclaw-empty-key");
+            openclaw.settings_config["models"] = json!([{
+                "id": "claude-sonnet-4",
+                "name": "DB model"
+            }]);
+            state
+                .db
+                .save_provider(AppType::OpenClaw.as_str(), &openclaw)
+                .expect("seed OpenClaw provider");
+            let mut openclaw_live = openclaw.settings_config.clone();
+            openclaw_live["apiKey"] = json!("");
+            openclaw_live["models"][0]["name"] = json!("Live model");
+            crate::openclaw_config::set_provider(&openclaw.id, openclaw_live)
+                .expect("seed OpenClaw live provider");
+
+            let hermes = hermes_provider("hermes-empty-key");
+            state
+                .db
+                .save_provider(AppType::Hermes.as_str(), &hermes)
+                .expect("seed Hermes provider");
+            let mut hermes_live = hermes.settings_config.clone();
+            hermes_live["api_key"] = json!("");
+            hermes_live["models"]["gpt-4o"]["name"] = json!("Hermes Live");
+            crate::hermes_config::set_provider(&hermes.id, hermes_live)
+                .expect("seed Hermes live provider");
+
+            assert_eq!(
+                import_openclaw_providers_from_live(state).expect("import OpenClaw live providers"),
+                1
+            );
+            assert_eq!(
+                import_hermes_providers_from_live(state).expect("import Hermes live providers"),
+                1
+            );
+
+            let openclaw_saved = state
+                .db
+                .get_provider_by_id(&openclaw.id, AppType::OpenClaw.as_str())
+                .expect("query OpenClaw")
+                .expect("OpenClaw exists");
+            assert_eq!(openclaw_saved.settings_config["apiKey"], json!("test-key"));
+            assert_eq!(
+                openclaw_saved.settings_config["models"][0]["name"],
+                json!("Live model")
+            );
+
+            let hermes_saved = state
+                .db
+                .get_provider_by_id(&hermes.id, AppType::Hermes.as_str())
+                .expect("query Hermes")
+                .expect("Hermes exists");
+            assert_eq!(hermes_saved.settings_config["api_key"], json!("test-key"));
+            assert_eq!(
+                hermes_saved.settings_config["models"][0]["name"],
+                json!("Hermes Live")
+            );
+        });
     }
 
     #[test]
@@ -3593,15 +3794,26 @@ impl ProviderService {
                 }
                 return Ok(true);
             }
-            let live_config_managed = Self::check_live_config_exists(
-                &app_type,
-                &provider.id,
-                Self::provider_live_config_managed(&provider).or_else(|| {
-                    existing_provider
-                        .as_ref()
-                        .and_then(Self::provider_live_config_managed)
-                }),
-            )?;
+            // The persisted row is authoritative for ownership.  Form/API
+            // payloads may omit metadata or carry a stale `false`; neither
+            // should downgrade an existing live-managed row while the live
+            // file is being rebuilt.
+            let prior_live_config_managed = existing_provider
+                .as_ref()
+                .and_then(Self::provider_live_config_managed)
+                .or_else(|| Self::provider_live_config_managed(&provider));
+            let live_config_exists =
+                Self::check_live_config_exists(&app_type, &provider.id, prior_live_config_managed)?;
+            // `Some(true)` is an ownership marker, not a cache of the last
+            // successful file lookup.  A CLI may temporarily remove/rebuild
+            // its config; flipping the marker to false here would make every
+            // future sync skip this provider forever.  Explicit DB-only rows
+            // (`Some(false)`) remain DB-only until the user writes them live.
+            let live_config_managed = if prior_live_config_managed == Some(true) {
+                true
+            } else {
+                live_config_exists
+            };
             Self::set_provider_live_config_managed(&mut provider, live_config_managed);
 
             if !live_config_managed {
@@ -4042,32 +4254,48 @@ impl ProviderService {
                             }
 
                             if let Some(mut current_provider) = providers.get(current_id).cloned() {
-                                // 切走前先把 live 里的可共享改动（含用户直接在应用内
-                                // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
-                                // 详见 sync_common_config_snippet_from_live 的文档。
-                                Self::sync_common_config_snippet_from_live(
-                                    state,
-                                    &app_type,
-                                    &current_provider,
-                                    &live_config,
-                                    &mut result,
-                                );
-                                current_provider.settings_config =
-                                    strip_common_config_from_live_settings(
+                                if !live_settings_have_content(&app_type, &live_config) {
+                                    result
+                                        .warnings
+                                        .push(format!("backfill_live_empty:{current_id}"));
+                                } else {
+                                    // Update the snippet first. The backfill stripper must use
+                                    // the newly extracted snippet; otherwise a shared key that
+                                    // was added directly in Live would remain in the provider
+                                    // snapshot (and the next switch would re-inject it).
+                                    Self::sync_common_config_snippet_from_live(
+                                        state,
+                                        &app_type,
+                                        &current_provider,
+                                        &live_config,
+                                        &mut result,
+                                    );
+                                    match backfill_live_into_provider(
                                         state.db.as_ref(),
                                         &app_type,
                                         &current_provider,
-                                        live_config,
-                                    );
-                                if let Err(e) =
-                                    state.db.save_provider(app_type.as_str(), &current_provider)
-                                {
-                                    log::warn!("Backfill failed: {e}");
-                                    result
-                                        .warnings
-                                        .push(format!("backfill_failed:{current_id}"));
-                                } else {
-                                    backfill_completed = true;
+                                        live_config.clone(),
+                                    ) {
+                                        Some(backfilled_settings) => {
+                                            current_provider.settings_config = backfilled_settings;
+                                            if let Err(e) = state
+                                                .db
+                                                .save_provider(app_type.as_str(), &current_provider)
+                                            {
+                                                log::warn!("Backfill failed: {e}");
+                                                result
+                                                    .warnings
+                                                    .push(format!("backfill_failed:{current_id}"));
+                                            } else {
+                                                backfill_completed = true;
+                                            }
+                                        }
+                                        None => {
+                                            result
+                                                .warnings
+                                                .push(format!("backfill_live_empty:{current_id}"));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4502,6 +4730,13 @@ impl ProviderService {
             }
         };
 
+        // An empty extraction means the live snapshot contained no shared
+        // fields.  It is not evidence that the user intentionally cleared the
+        // DB snippet; keep the existing SSOT untouched.
+        if new_snippet.trim().is_empty() || new_snippet.trim() == "{}" {
+            return;
+        }
+
         // 未变化则跳过，避免无谓写库（不切 live 配置时这是常态路径）。
         let current = state
             .db
@@ -4514,7 +4749,7 @@ impl ProviderService {
 
         if let Err(err) = state
             .db
-            .set_config_snippet(app_type.as_str(), Some(new_snippet))
+            .set_config_snippet_if_meaningful(app_type.as_str(), Some(new_snippet))
         {
             log::warn!(
                 "Failed to persist synced common config for {} provider '{}': {err}",
@@ -5044,15 +5279,17 @@ impl ProviderService {
         // 6) 片段本身：保留可共享的部分。全部清空时删行而不是写 "{}"——留着空行会让
         //    should_auto_extract_config_snippet 永远为 false，用户的合法共享配置再也
         //    重建不回来。同理绝不置 cleared 标记。
-        if clean.is_empty() {
-            state.db.set_config_snippet(app.as_str(), None)?;
+        let cleaned_snippet = if clean.is_empty() {
+            None
         } else {
-            let cleaned_snippet = serde_json::to_string_pretty(&Value::Object(clean))
-                .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))?;
-            state
-                .db
-                .set_config_snippet(app.as_str(), Some(cleaned_snippet))?;
-        }
+            Some(
+                serde_json::to_string_pretty(&Value::Object(clean))
+                    .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))?,
+            )
+        };
+        state
+            .db
+            .set_config_snippet_if_meaningful(app.as_str(), cleaned_snippet)?;
 
         state.db.set_setting(FLAG, "true")?;
         log::info!("Gemini 通用配置凭据清理完成");

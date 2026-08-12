@@ -99,6 +99,8 @@ export const useSettingsQuery = (): UseQueryResult<Settings> => {
 export interface UseUsageQueryOptions {
   enabled?: boolean;
   autoQueryInterval?: number; // 自动查询间隔（分钟），0 表示禁用
+  /** Keep opt-in background polling for callers that explicitly need it. */
+  refetchIntervalInBackground?: boolean;
 }
 
 /** keep-last-good 判定所需的最小结果形状（UsageResult / SubscriptionQuota 都满足）。 */
@@ -247,7 +249,11 @@ export const useUsageQuery = (
   appId: AppId,
   options?: UseUsageQueryOptions,
 ) => {
-  const { enabled = true, autoQueryInterval = 0 } = options || {};
+  const {
+    enabled = true,
+    autoQueryInterval = 0,
+    refetchIntervalInBackground = false,
+  } = options || {};
 
   // 计算 staleTime：如果有自动刷新间隔，使用该间隔；否则默认 5 分钟
   // 这样可以避免切换 app 页面时重复触发查询
@@ -264,7 +270,7 @@ export const useUsageQuery = (
       autoQueryInterval > 0
         ? Math.max(autoQueryInterval, 1) * 60 * 1000 // 最小1分钟
         : false,
-    refetchIntervalInBackground: true, // 后台也继续定时查询
+    refetchIntervalInBackground,
     refetchOnWindowFocus: false,
     // 用量查询面向跨境/第三方端点，单次网络抖动或瞬时 5xx 不应直接判失败。
     // 后端已把瞬时传输失败（网络/超时/读体中断）转成 Err → invoke reject，

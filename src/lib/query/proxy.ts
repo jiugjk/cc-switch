@@ -34,11 +34,15 @@ export function useProxyStatusQuery() {
 /**
  * 获取各应用接管状态
  */
-export function useProxyTakeoverStatus(poll = true) {
+export function useProxyTakeoverStatus(poll = true, enabled = true) {
   return useQuery({
     queryKey: proxyKeys.takeoverStatus,
     queryFn: () => proxyApi.getProxyTakeoverStatus(),
-    refetchInterval: poll ? 2000 : false,
+    // Takeover state only changes while the proxy is active. Callers that
+    // render a stopped panel can disable this query so it does not wake the
+    // backend every two seconds in the background.
+    enabled,
+    refetchInterval: enabled && poll ? 2000 : false,
     ...(poll
       ? {}
       : {

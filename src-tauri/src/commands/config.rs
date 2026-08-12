@@ -266,7 +266,7 @@ pub async fn set_claude_common_config_snippet(
 
     state
         .db
-        .set_config_snippet("claude", value)
+        .set_config_snippet_if_meaningful("claude", value)
         .map_err(|e| e.to_string())?;
     state
         .db
@@ -336,7 +336,7 @@ pub async fn set_common_config_snippet(
 
     state
         .db
-        .set_config_snippet(&app_type, value)
+        .set_config_snippet_if_meaningful(&app_type, value)
         .map_err(|e| e.to_string())?;
     state
         .db

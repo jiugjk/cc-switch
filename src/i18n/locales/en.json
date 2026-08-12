@@ -2552,6 +2552,8 @@
     "configDetails": "Config Details",
     "configUrl": "Config File URL",
     "configMergeError": "Failed to merge configuration file",
+    "configPreviewTooLarge": "This configuration is too large to preview safely (limit: 64 KiB). Review its source carefully before importing.",
+    "configPreviewUnavailable": "This configuration could not be parsed for preview. Review its source carefully before importing.",
     "primaryEndpoint": "Primary",
     "mcp": {
       "title": "Batch Import MCP Servers",
@@ -2741,6 +2743,8 @@
       },
       "invalidPort": "Invalid port, please enter a number between 1024-65535",
       "invalidAddress": "Invalid address. Enter an IPv4 (e.g. 127.0.0.1), IPv6 (e.g. ::1), or localhost",
+      "nonLoopbackWarning": "This address exposes the credential proxy to other devices on the network. Remote requests require the gateway token, but you should continue only on a trusted network. Save this address?",
+      "nonLoopbackActiveWarning": "The routing service is reachable from other devices on this network. Remote requests are protected by the gateway token; keep the token private and use this only on a trusted network.",
       "configSaved": "Routing configuration saved",
       "configSaveFailed": "Failed to save configuration",
       "restartRequired": "Restart routing service for address or port changes to take effect"

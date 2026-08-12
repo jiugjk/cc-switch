@@ -46,6 +46,7 @@ jobs:
               - "tailwind.config.cjs"
               - "postcss.config.cjs"
               - "components.json"
+              - ".github/dependabot.yml"
               - ".github/workflows/**"
             backend:
               - "src-tauri/**"
@@ -96,6 +97,50 @@ jobs:
 
       - name: Unit tests
         run: pnpm test:unit
+
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    needs: changes
+    # Dependency updates should not be silently skipped on PRs that touch
+    # either frontend or backend manifests.
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.changes.outputs.frontend == 'true' ||
+      needs.changes.outputs.backend == 'true'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.12.3
+          run_install: false
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm audit (high and critical)
+        run: pnpm audit --audit-level high
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        # rust_decimal lists rkyv 0.7 as an optional dependency in Cargo.lock,
+        # but this project does not enable that feature (`cargo tree -i rkyv` is empty).
+        run: cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2026-0235
 
   backend:
     name: Backend Checks

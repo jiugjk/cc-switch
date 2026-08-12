@@ -84,6 +84,12 @@ pub struct ProxyStatus {
     pub last_request_at: Option<String>,
     /// 最后一次错误信息
     pub last_error: Option<String>,
+    /// 是否监听在非回环地址（远程请求仍要求网关令牌）。
+    ///
+    /// 该字段用于前端持续显示网络暴露面，避免用户把“已启用鉴权”
+    /// 误解成“监听在公网没有风险”。
+    #[serde(default)]
+    pub insecure_exposure: bool,
     /// Provider故障转移次数
     pub failover_count: u64,
     /// 当前活跃的代理目标列表

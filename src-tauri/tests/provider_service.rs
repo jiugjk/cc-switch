@@ -3403,3 +3403,170 @@ fn provider_service_switch_codex_warns_when_live_settings_unreadable() {
         result.warnings
     );
 }
+
+#[test]
+fn provider_service_switch_skips_backfill_when_claude_live_is_empty() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let settings_path = get_claude_settings_path();
+    std::fs::create_dir_all(settings_path.parent().expect("claude dir"))
+        .expect("create Claude config dir");
+    std::fs::write(&settings_path, "{}\n").expect("seed empty Claude live settings");
+
+    let old_settings = json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "old-secret",
+            "ANTHROPIC_BASE_URL": "https://old.example"
+        }
+    });
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                old_settings.clone(),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "new-secret",
+                        "ANTHROPIC_BASE_URL": "https://new.example"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    let result = ProviderService::switch(&state, AppType::Claude, "new-provider")
+        .expect("switch should succeed");
+
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning == "backfill_live_empty:old-provider"));
+    let stored = state
+        .db
+        .get_provider_by_id("old-provider", AppType::Claude.as_str())
+        .expect("query old provider")
+        .expect("old provider exists");
+    assert_eq!(stored.settings_config, old_settings);
+}
+
+#[test]
+fn provider_service_switch_codex_preserves_db_auth_when_auth_file_is_deleted() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_config = "model_provider = \"custom\"\nmodel = \"gpt-5-live\"\n";
+    let config_path = cc_switch_lib::get_codex_config_path();
+    std::fs::create_dir_all(config_path.parent().expect("codex dir"))
+        .expect("create Codex config dir");
+    std::fs::write(&config_path, live_config).expect("seed config-only Codex live state");
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    assert!(
+        !auth_path.exists(),
+        "auth.json must be absent for the regression"
+    );
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "old-secret" },
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5-old\"\n"
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "new-secret" },
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5-new\"\n"
+                }),
+                None,
+            ),
+        );
+    }
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::Codex, "new-provider").expect("switch should succeed");
+
+    let stored = state
+        .db
+        .get_provider_by_id("old-provider", AppType::Codex.as_str())
+        .expect("query old provider")
+        .expect("old provider exists");
+    assert_eq!(
+        stored
+            .settings_config
+            .pointer("/auth/OPENAI_API_KEY")
+            .and_then(|value| value.as_str()),
+        Some("old-secret")
+    );
+    assert_eq!(
+        stored
+            .settings_config
+            .get("config")
+            .and_then(|value| value.as_str()),
+        Some(live_config)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn database_init_creates_private_config_directory_and_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+    let _state = create_test_state().expect("create test state");
+
+    let config_dir = home.join(".cc-switch");
+    let db_path = config_dir.join("cc-switch.db");
+    assert_eq!(
+        std::fs::metadata(&config_dir)
+            .expect("config directory metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&db_path)
+            .expect("database metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}

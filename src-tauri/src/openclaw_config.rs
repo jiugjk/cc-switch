@@ -385,6 +385,12 @@ fn write_root_section(section: &str, value: &Value) -> Result<OpenClawWriteOutco
 fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_app_config_dir().join("backups").join("openclaw");
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| AppError::io(&backup_dir, e))?;
+    }
 
     let base_id = format!("openclaw_{}", Local::now().format("%Y%m%d_%H%M%S"));
     let mut filename = format!("{base_id}.json5");

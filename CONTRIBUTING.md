@@ -8,9 +8,9 @@ Thank you for your interest in contributing to CC Switch! Please read our [Code 
 
 There are many ways to contribute:
 
-- **Report bugs** — Found something broken? [Open a bug report](https://github.com/farion1231/cc-switch/issues/new?template=bug_report.yml).
-- **Suggest features** — Have an idea? [Submit a feature request](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml).
-- **Improve docs** — Spot a typo or missing info? [Report a doc issue](https://github.com/farion1231/cc-switch/issues/new?template=doc_issue.yml).
+- **Report bugs** — Found something broken? [Open a bug report](https://github.com/jiugjk/cc-switch/issues/new?template=bug_report.yml).
+- **Suggest features** — Have an idea? [Submit a feature request](https://github.com/jiugjk/cc-switch/issues/new?template=feature_request.yml).
+- **Improve docs** — Spot a typo or missing info? [Report a doc issue](https://github.com/jiugjk/cc-switch/issues/new?template=doc_issue.yml).
 - **Contribute code** — Fix bugs or implement features via pull requests.
 - **Translate** — Help us improve translations for English, Chinese, and Japanese.
 
@@ -21,7 +21,7 @@ There are many ways to contribute:
 ### Prerequisites
 
 - Node.js 18+ and pnpm 8+
-- Rust 1.85+ and Cargo
+- Rust 1.88+ and Cargo
 - [Tauri 2.0 prerequisites](https://v2.tauri.app/start/prerequisites/)
 
 > **pnpm version**: the exact version is pinned via the `packageManager` field
@@ -129,8 +129,8 @@ CC Switch supports English, Simplified Chinese, Traditional Chinese, and Japanes
 
 ## Questions?
 
-- [Open a question](https://github.com/farion1231/cc-switch/issues/new?template=question.yml)
-- [GitHub Discussions](https://github.com/farion1231/cc-switch/discussions)
+- [Open a question](https://github.com/jiugjk/cc-switch/issues/new?template=question.yml)
+- [GitHub Discussions](https://github.com/jiugjk/cc-switch/discussions)
 
 ---
 
@@ -144,9 +144,9 @@ CC Switch supports English, Simplified Chinese, Traditional Chinese, and Japanes
 
 你可以通过多种方式参与贡献：
 
-- **报告 Bug** — 发现问题？[提交 Bug 报告](https://github.com/farion1231/cc-switch/issues/new?template=bug_report.yml)。
-- **建议功能** — 有想法？[提交功能请求](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml)。
-- **改进文档** — 发现错误或缺失？[报告文档问题](https://github.com/farion1231/cc-switch/issues/new?template=doc_issue.yml)。
+- **报告 Bug** — 发现问题？[提交 Bug 报告](https://github.com/jiugjk/cc-switch/issues/new?template=bug_report.yml)。
+- **建议功能** — 有想法？[提交功能请求](https://github.com/jiugjk/cc-switch/issues/new?template=feature_request.yml)。
+- **改进文档** — 发现错误或缺失？[报告文档问题](https://github.com/jiugjk/cc-switch/issues/new?template=doc_issue.yml)。
 - **贡献代码** — 通过 Pull Request 修复 Bug 或实现新功能。
 - **翻译** — 帮助改进英文、中文和日文的翻译。
 
@@ -157,7 +157,7 @@ CC Switch supports English, Simplified Chinese, Traditional Chinese, and Japanes
 ### 前提条件
 
 - Node.js 18+ 和 pnpm 8+
-- Rust 1.85+ 和 Cargo
+- Rust 1.88+ 和 Cargo
 - [Tauri 2.0 开发环境](https://v2.tauri.app/start/prerequisites/)
 
 > **pnpm 版本**：确切版本由 `package.json` 的 `packageManager` 字段固定
@@ -263,5 +263,5 @@ CC Switch 支持英文、简体中文、繁体中文和日文。修改用户可�
 
 ## 有疑问？
 
-- [提问](https://github.com/farion1231/cc-switch/issues/new?template=question.yml)
-- [GitHub 讨论区](https://github.com/farion1231/cc-switch/discussions)
+- [提问](https://github.com/jiugjk/cc-switch/issues/new?template=question.yml)
+- [GitHub 讨论区](https://github.com/jiugjk/cc-switch/discussions)

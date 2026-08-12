@@ -4,6 +4,9 @@ import { parseDeepLinkConfigPreview } from "@/utils/deepLinkConfigPreview";
 const encodeBase64 = (value: string) =>
   btoa(String.fromCharCode(...new TextEncoder().encode(value)));
 
+const encodeLargeBase64 = (value: string) =>
+  Buffer.from(value, "utf8").toString("base64");
+
 const encodeUrlSafeBase64WithoutPadding = (value: string) =>
   encodeBase64(value)
     .replace(/\+/g, "-")
@@ -23,6 +26,31 @@ context_window = 500000
 `;
 
 describe("parseDeepLinkConfigPreview", () => {
+  it("does not parse payloads larger than the preview budget", () => {
+    const oversizedToml = `# ${"x".repeat(64 * 1024)}\n`;
+    const preview = parseDeepLinkConfigPreview({
+      app: "grokbuild",
+      config: encodeLargeBase64(oversizedToml),
+      configFormat: "toml",
+    });
+
+    expect(preview).toEqual({
+      type: "generic",
+      configText: null,
+      oversized: true,
+    });
+  });
+
+  it("returns no preview for malformed configuration instead of throwing", () => {
+    expect(
+      parseDeepLinkConfigPreview({
+        app: "hermes",
+        config: encodeBase64("{not valid json"),
+        configFormat: "json",
+      }),
+    ).toBeNull();
+  });
+
   it("previews direct Grok Build TOML and masks its API key", () => {
     const preview = parseDeepLinkConfigPreview({
       app: "grokbuild",

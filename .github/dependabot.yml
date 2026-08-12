@@ -10,9 +10,12 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
-      frontend-deps:
-        patterns:
-          - "*"
+      # Keep low-risk updates moving together while allowing each major
+      # upgrade to be reviewed and merged independently.
+      frontend-minor:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "cargo"
     directory: "/src-tauri"

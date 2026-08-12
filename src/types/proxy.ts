@@ -25,6 +25,8 @@ export interface ProxyStatus {
   current_provider_id: string | null;
   last_request_at: string | null;
   last_error: string | null;
+  /** The server is listening beyond loopback; remote peers require a gateway token. */
+  insecure_exposure: boolean;
   failover_count: number;
   active_targets?: ActiveTarget[];
   /** 最近一次成功请求实际转发的协议（responses / chat_completions / anthropic / native）。 */

@@ -1016,6 +1016,12 @@ pub struct OpenCodeProviderConfig {
     /// 模型定义映射
     #[serde(default)]
     pub models: HashMap<String, OpenCodeModel>,
+
+    /// 未建模的供应商级字段（例如 `env`、`api`、插件扩展字段）。
+    /// OpenCode 会在配置往返时保留这些字段；丢弃它们会让一次编辑
+    /// 意外删除用户手写的路由/环境配置。
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, Value>,
 }
 
 impl Default for OpenCodeProviderConfig {
@@ -1025,6 +1031,7 @@ impl Default for OpenCodeProviderConfig {
             name: None,
             options: OpenCodeProviderOptions::default(),
             models: HashMap::new(),
+            extra: HashMap::new(),
         }
     }
 }
@@ -1479,6 +1486,25 @@ mod tests {
         assert!(config.options.api_key.is_none());
         assert!(config.options.headers.is_none());
         assert!(config.options.extra.is_empty());
+        assert!(config.extra.is_empty());
+    }
+
+    #[test]
+    fn opencode_provider_config_preserves_unknown_top_level_fields() {
+        let input = serde_json::json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "options": { "apiKey": "secret" },
+            "models": {},
+            "env": { "OPENAI_API_KEY": "{env:OPENAI_API_KEY}" },
+            "api": "responses"
+        });
+
+        let config: OpenCodeProviderConfig =
+            serde_json::from_value(input.clone()).expect("deserialize OpenCode provider");
+        let output = serde_json::to_value(config).expect("serialize OpenCode provider");
+
+        assert_eq!(output["env"], input["env"]);
+        assert_eq!(output["api"], input["api"]);
     }
 
     #[test]

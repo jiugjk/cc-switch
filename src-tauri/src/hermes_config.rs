@@ -363,6 +363,12 @@ fn replace_yaml_section(
 fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_app_config_dir().join("backups").join("hermes");
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| AppError::io(&backup_dir, e))?;
+    }
 
     let base_id = format!("hermes_{}", Local::now().format("%Y%m%d_%H%M%S"));
     let mut filename = format!("{base_id}.yaml");
@@ -451,10 +457,6 @@ fn write_yaml_section_to_config_locked(
     } else {
         None
     };
-
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
 
     atomic_write(&config_path, new_raw.as_bytes())?;
 

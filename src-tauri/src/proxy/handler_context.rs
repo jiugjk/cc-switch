@@ -95,17 +95,24 @@ impl RequestContext {
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
 
-        // 从数据库读取应用级代理配置（per-app）
-        let app_config = state
+        // These rusqlite-backed getters are synchronous despite some legacy
+        // async signatures. Fetch the request configuration as one blocking
+        // task so an SQLite lock or disk read cannot stall an Axum worker.
+        let app_type_owned = app_type_str.to_string();
+        let (app_config, rectifier_config, optimizer_config, copilot_optimizer_config) = state
             .db
-            .get_proxy_config_for_app(app_type_str)
+            .spawn(move |db| {
+                let app_config =
+                    futures::executor::block_on(db.get_proxy_config_for_app(&app_type_owned))?;
+                Ok((
+                    app_config,
+                    db.get_rectifier_config().unwrap_or_default(),
+                    db.get_optimizer_config().unwrap_or_default(),
+                    db.get_copilot_optimizer_config().unwrap_or_default(),
+                ))
+            })
             .await
             .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
-
-        // 从数据库读取整流器配置
-        let rectifier_config = state.db.get_rectifier_config().unwrap_or_default();
-        let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
-        let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
 
         let current_provider_id =
             crate::settings::get_current_provider(&app_type).unwrap_or_default();

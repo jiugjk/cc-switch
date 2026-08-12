@@ -264,7 +264,7 @@ Download the latest release from the [Releases](../../releases) page. Assets typ
 
 - Node.js 18+
 - pnpm 8+
-- Rust 1.85+
+- Rust 1.88+
 - Tauri CLI 2.8+
 
 ### Development Commands

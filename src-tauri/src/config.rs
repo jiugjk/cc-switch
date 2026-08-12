@@ -295,11 +295,6 @@ pub fn write_json_file_with_contents<T: Serialize>(
     path: &Path,
     data: &T,
 ) -> Result<Vec<u8>, AppError> {
-    // 确保目录存在
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
     let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
     let sorted_value = sort_json_keys(&value);
     let json = serde_json::to_string_pretty(&sorted_value)
@@ -317,16 +312,25 @@ pub fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), AppErr
 
 /// 原子写入文本文件（用于 TOML/纯文本）
 pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
     atomic_write(path, data.as_bytes())
 }
 
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
+    #[cfg(unix)]
+    let parent_was_missing = path.parent().is_some_and(|parent| !parent.exists());
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+
+        // Configuration directories may be created on first run.  Keep newly
+        // created directories private on Unix instead of inheriting the
+        // process umask's commonly-readable default.
+        #[cfg(unix)]
+        if parent_was_missing {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .map_err(|e| AppError::io(parent, e))?;
+        }
     }
 
     let parent = path
@@ -367,21 +371,27 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         Err(AppError::io(&candidate, source))
     })()?;
 
-    if let Err(source) = file.write_all(data).and_then(|_| file.flush()) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Preserve an existing destination's explicit mode.  A first write
+        // has no destination to inherit, so default to owner-only access.
+        let mode = fs::metadata(path)
+            .map(|meta| meta.permissions().mode() & 0o777)
+            .unwrap_or(0o600);
+        if let Err(source) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(AppError::io(&tmp, source));
+        }
+    }
+
+    if let Err(source) = file.write_all(data).and_then(|_| file.sync_all()) {
         drop(file);
         let _ = fs::remove_file(&tmp);
         return Err(AppError::io(&tmp, source));
     }
     drop(file);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            let perm = meta.permissions().mode();
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
-        }
-    }
 
     #[cfg(windows)]
     {
@@ -470,6 +480,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                 source,
             });
         }
+
+        // A durable file does not imply a durable directory entry.  Sync the
+        // parent after rename so a crash cannot resurrect the old projection.
+        if let Ok(dir) = fs::File::open(parent) {
+            if let Err(source) = dir.sync_all() {
+                log::warn!("无法持久化配置目录 {}: {source}", parent.display());
+            }
+        }
     }
     Ok(())
 }
@@ -503,6 +521,31 @@ mod tests {
     fn atomic_write_replaces_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         assert_atomic_write_replaces_existing_file(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_private_file_and_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let private_dir = root.path().join("new-config-dir");
+        let path = private_dir.join("auth.json");
+
+        atomic_write(&path, br#"{"token":"secret"}"#).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&private_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 
     #[cfg(windows)]

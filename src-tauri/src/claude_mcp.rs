@@ -111,9 +111,6 @@ fn read_json_value(path: &Path) -> Result<Value, AppError> {
 }
 
 fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
     let json =
         serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })?;
     atomic_write(path, json.as_bytes())

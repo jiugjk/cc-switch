@@ -266,7 +266,7 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 - Node.js 18+
 - pnpm 8+
-- Rust 1.85+
+- Rust 1.88+
 - Tauri CLI 2.8+
 
 ### 开发命令

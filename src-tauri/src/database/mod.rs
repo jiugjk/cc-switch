@@ -104,9 +104,45 @@ impl Database {
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) =
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                {
+                    log::warn!("无法收紧数据库目录权限 {}: {e}", parent.display());
+                }
+            }
         }
 
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600))
+            {
+                log::warn!("无法收紧数据库文件权限 {}: {e}", db_path.display());
+            }
+        }
+
+        // WAL allows readers to proceed while usage logging writes are in
+        // flight.  Network filesystems may reject it, so retain the safe
+        // rollback-journal fallback instead of failing startup.
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => {
+                if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
+                    log::warn!("设置 SQLite synchronous=NORMAL 失败，将使用默认值: {e}");
+                }
+            }
+            Err(e) => {
+                log::warn!("启用 SQLite WAL 失败，将回退到默认 journal: {e}");
+            }
+        }
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| AppError::Database(format!("设置 SQLite busy_timeout 失败: {e}")))?;
 
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
@@ -164,6 +200,22 @@ impl Database {
         }
 
         Ok(db)
+    }
+
+    /// Run a synchronous SQLite operation on Tokio's blocking pool.
+    ///
+    /// Axum handlers must use this boundary: rusqlite serializes access behind
+    /// the connection mutex and would otherwise occupy an async worker while
+    /// waiting for a lock or disk I/O.
+    pub async fn spawn<T, F>(self: &std::sync::Arc<Self>, operation: F) -> Result<T, AppError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Database) -> Result<T, AppError> + Send + 'static,
+    {
+        let db = std::sync::Arc::clone(self);
+        tokio::task::spawn_blocking(move || operation(db.as_ref()))
+            .await
+            .map_err(|e| AppError::Database(format!("DB task join error: {e}")))?
     }
 
     /// 读取磁盘上数据库的 `user_version`；仅当它比应用支持的 [`SCHEMA_VERSION`]

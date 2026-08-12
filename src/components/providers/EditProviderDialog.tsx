@@ -10,6 +10,126 @@ import {
 } from "@/components/providers/forms/ProviderForm";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
 
+function hasSemanticLiveContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "boolean" || typeof value === "number") return true;
+  if (Array.isArray(value)) return value.some(hasSemanticLiveContent);
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some(
+      hasSemanticLiveContent,
+    );
+  }
+  return false;
+}
+
+function hasSemanticConfigText(value: unknown): boolean {
+  if (typeof value !== "string") return hasSemanticLiveContent(value);
+  return value.split("\n").some((line) => {
+    const trimmed = line.trim();
+    return trimmed.length > 0 && !trimmed.startsWith("#");
+  });
+}
+
+function hasSemanticLiveContentForApp(
+  appId: AppId,
+  value: Record<string, unknown>,
+): boolean {
+  if (appId === "codex") {
+    return (
+      hasSemanticLiveContent(value.auth) ||
+      hasSemanticConfigText(value.config) ||
+      Object.entries(value).some(
+        ([key, item]) =>
+          key !== "auth" && key !== "config" && hasSemanticLiveContent(item),
+      )
+    );
+  }
+  if (appId === "gemini") {
+    return (
+      hasSemanticLiveContent(value.env) ||
+      hasSemanticLiveContent(value.config) ||
+      Object.entries(value).some(
+        ([key, item]) =>
+          key !== "env" && key !== "config" && hasSemanticLiveContent(item),
+      )
+    );
+  }
+  return hasSemanticLiveContent(value);
+}
+
+function mergeMissingLiveValues(liveValue: unknown, dbValue: unknown): unknown {
+  if (
+    liveValue &&
+    typeof liveValue === "object" &&
+    !Array.isArray(liveValue) &&
+    dbValue &&
+    typeof dbValue === "object" &&
+    !Array.isArray(dbValue)
+  ) {
+    const merged: Record<string, unknown> = {
+      ...(dbValue as Record<string, unknown>),
+      ...(liveValue as Record<string, unknown>),
+    };
+    for (const [key, value] of Object.entries(
+      dbValue as Record<string, unknown>,
+    )) {
+      const current = (liveValue as Record<string, unknown>)[key];
+      if (!hasSemanticLiveContent(current)) {
+        merged[key] = value;
+      } else if (
+        current &&
+        typeof current === "object" &&
+        !Array.isArray(current) &&
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        merged[key] = mergeMissingLiveValues(current, value);
+      }
+    }
+    return merged;
+  }
+  return hasSemanticLiveContent(liveValue) ? liveValue : dbValue;
+}
+
+function pickAuthoritativeSettings(
+  appId: AppId,
+  liveSettings: Record<string, unknown> | null,
+  dbSettings: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const db = dbSettings ?? {};
+  if (!liveSettings || !hasSemanticLiveContentForApp(appId, liveSettings)) {
+    return db;
+  }
+
+  const merged: Record<string, unknown> = {
+    ...liveSettings,
+  };
+
+  // Credentials are provider-owned SSOT sections. A CLI can leave the rest
+  // of its live file intact while deleting auth.json/.env or blanking a key.
+  if (appId === "codex") {
+    if (db.auth) {
+      merged.auth = mergeMissingLiveValues(liveSettings.auth, db.auth);
+    }
+  } else if (appId === "claude" || appId === "gemini") {
+    if (db.env) {
+      merged.env = mergeMissingLiveValues(liveSettings.env, db.env);
+    }
+  } else if (appId === "openclaw") {
+    for (const key of ["apiKey", "baseUrl", "api_key", "base_url"]) {
+      if (db[key] !== undefined && !hasSemanticLiveContent(liveSettings[key])) {
+        merged[key] = db[key];
+      }
+    }
+  } else if (appId === "opencode" && db.options) {
+    merged.options = mergeMissingLiveValues(liveSettings.options, db.options);
+  }
+
+  return merged;
+}
+
 interface EditProviderDialogProps {
   open: boolean;
   provider: Provider | null;
@@ -132,22 +252,18 @@ export function EditProviderDialog({
   }, [open, provider?.id, appId, hasLoadedLive, isProxyTakeover]); // 只依赖 provider.id，不依赖整个 provider 对象
 
   const initialSettingsConfig = useMemo(() => {
-    const base = (liveSettings ?? provider?.settingsConfig ?? {}) as Record<
-      string,
-      unknown
-    >;
+    const base = pickAuthoritativeSettings(
+      appId,
+      liveSettings,
+      provider?.settingsConfig as Record<string, unknown> | undefined,
+    );
 
     // Codex 的 modelCatalog 是 cc-switch 私有字段，SSOT 在数据库。Live 的 config.toml
     // 仅在写入时投影出 model_catalog_json 指针；Codex.app 改写配置、代理接管/恢复周期、
     // 来回切换供应商都可能让 Live 丢失该投影，从而 read_live_settings 反解为空。
     // 若放任 Live 覆盖，编辑界面会显示空映射表，保存后连同数据库里的映射一起清空（数据丢失）。
     // 因此始终以数据库 SSOT 的 modelCatalog 为准，仅在数据库确实没有时才回退到 Live 反解结果。
-    if (
-      appId === "codex" &&
-      liveSettings &&
-      provider?.settingsConfig &&
-      typeof provider.settingsConfig === "object"
-    ) {
+    if (appId === "codex" && provider?.settingsConfig) {
       const dbCatalog = (provider.settingsConfig as Record<string, unknown>)
         .modelCatalog;
       if (dbCatalog !== undefined) {

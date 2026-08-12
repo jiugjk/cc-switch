@@ -129,6 +129,38 @@ describe("DeepLinkImportDialog", () => {
     expect(screen.queryByText("deeplink.configDetails")).toBeNull();
   });
 
+  it("warns when an embedded configuration cannot be previewed", async () => {
+    server.use(
+      http.post(
+        "http://tauri.local/merge_deeplink_config",
+        async ({ request }) => {
+          const body = (await request.json()) as {
+            request: Record<string, unknown>;
+          };
+          return HttpResponse.json(body.request);
+        },
+      ),
+    );
+
+    renderDialog();
+    await act(async () => {});
+    await act(async () => {
+      emitTauriEvent("deeplink-import", {
+        version: "1",
+        resource: "provider",
+        app: "hermes",
+        name: "Malformed Config",
+        apiKey: "key",
+        config: Buffer.from("{not valid json", "utf8").toString("base64"),
+        configFormat: "json",
+      });
+    });
+
+    expect(
+      await screen.findByTestId("deeplink-config-preview-warning"),
+    ).toHaveTextContent("deeplink.configPreviewUnavailable");
+  });
+
   it("preserves arrival order and cancel advances to the next queued event", async () => {
     let releaseFirstMerge!: () => void;
     const firstMergeGate = new Promise<void>((resolve) => {

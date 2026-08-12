@@ -1915,8 +1915,11 @@ fn initialize_common_config_snippets(state: &store::AppState) {
             &settings,
         ) {
             Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
-                match state.db.set_config_snippet(app_type.as_str(), Some(snippet)) {
-                    Ok(()) => {
+                match state
+                    .db
+                    .set_config_snippet_if_meaningful(app_type.as_str(), Some(snippet))
+                {
+                    Ok(_) => {
                         let _ = state.db.set_config_snippet_cleared(app_type.as_str(), false);
                         log::info!(
                             "✓ Auto-extracted common config snippet for {}",

@@ -19,9 +19,21 @@ pub async fn execute_usage_script(
     // 优先使用前端传递的 template_type
     let is_custom_template = template_type.map(|t| t == "custom").unwrap_or(false);
 
-    // 1. 替换模板变量，避免泄露敏感信息
-    let script_with_vars =
-        build_script_with_vars(script_code, api_key, base_url, access_token, user_id);
+    // 1. Bind template variables to private QuickJS globals.  Secret values
+    // never become part of the source string (which can be echoed by a syntax
+    // error or a diagnostic log).
+    let bound_script = bind_template_vars(script_code);
+    let known_secrets: Vec<String> = [
+        Some(api_key),
+        Some(base_url),
+        access_token.filter(|value| !value.is_empty()),
+        user_id.filter(|value| !value.is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|value| !value.is_empty())
+    .map(ToOwned::to_owned)
+    .collect();
 
     // 2. 验证 base_url 的安全性（仅当提供了 base_url 时）
     // 自定义模板模式下，用户可能不使用模板变量，而是直接在脚本中写完整 URL
@@ -71,18 +83,85 @@ pub async fn execute_usage_script(
         let context = Context::full(&runtime).map_err(|e| {
             AppError::localized(
                 "usage_script.context_create_failed",
-                format!("创建 JS 上下文失败: {e}"),
-                format!("Failed to create JS context: {e}"),
+                format!(
+                    "创建 JS 上下文失败: {}",
+                    redact_script_error(&e, &known_secrets)
+                ),
+                format!(
+                    "Failed to create JS context: {}",
+                    redact_script_error(&e, &known_secrets)
+                ),
             )
         })?;
 
         context.with(|ctx| {
+            let globals = ctx.globals();
+            globals.set("__ccsApiKey", api_key).map_err(|e| {
+                AppError::localized(
+                    "usage_script.variable_bind_failed",
+                    format!(
+                        "绑定 apiKey 失败: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Failed to bind apiKey: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                )
+            })?;
+            globals.set("__ccsBaseUrl", base_url).map_err(|e| {
+                AppError::localized(
+                    "usage_script.variable_bind_failed",
+                    format!(
+                        "绑定 baseUrl 失败: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Failed to bind baseUrl: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                )
+            })?;
+            globals
+                .set("__ccsAccessToken", access_token.unwrap_or(""))
+                .map_err(|e| {
+                    AppError::localized(
+                        "usage_script.variable_bind_failed",
+                        format!(
+                            "绑定 accessToken 失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to bind accessToken: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                    )
+                })?;
+            globals
+                .set("__ccsUserId", user_id.unwrap_or(""))
+                .map_err(|e| {
+                    AppError::localized(
+                        "usage_script.variable_bind_failed",
+                        format!(
+                            "绑定 userId 失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to bind userId: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                    )
+                })?;
+
             // 执行用户代码，获取配置对象
-            let config: rquickjs::Object = ctx.eval(script_with_vars.clone()).map_err(|e| {
+            let config: rquickjs::Object = ctx.eval(bound_script.as_str()).map_err(|e| {
                 AppError::localized(
                     "usage_script.config_parse_failed",
-                    format!("解析配置失败: {e}"),
-                    format!("Failed to parse config: {e}"),
+                    format!("解析配置失败: {}", redact_script_error(&e, &known_secrets)),
+                    format!(
+                        "Failed to parse config: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
                 )
             })?;
 
@@ -90,8 +169,14 @@ pub async fn execute_usage_script(
             let request: rquickjs::Object = config.get("request").map_err(|e| {
                 AppError::localized(
                     "usage_script.request_missing",
-                    format!("缺少 request 配置: {e}"),
-                    format!("Missing request config: {e}"),
+                    format!(
+                        "缺少 request 配置: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Missing request config: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
                 )
             })?;
 
@@ -101,8 +186,14 @@ pub async fn execute_usage_script(
                 .map_err(|e| {
                     AppError::localized(
                         "usage_script.request_serialize_failed",
-                        format!("序列化 request 失败: {e}"),
-                        format!("Failed to serialize request: {e}"),
+                        format!(
+                            "序列化 request 失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to serialize request: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
                     )
                 })?
                 .ok_or_else(|| {
@@ -116,8 +207,14 @@ pub async fn execute_usage_script(
                 .map_err(|e| {
                     AppError::localized(
                         "usage_script.get_string_failed",
-                        format!("获取字符串失败: {e}"),
-                        format!("Failed to get string: {e}"),
+                        format!(
+                            "获取字符串失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to get string: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
                     )
                 })?;
 
@@ -129,8 +226,14 @@ pub async fn execute_usage_script(
     let request: RequestConfig = serde_json::from_str(&request_config).map_err(|e| {
         AppError::localized(
             "usage_script.request_format_invalid",
-            format!("request 配置格式错误: {e}"),
-            format!("Invalid request config format: {e}"),
+            format!(
+                "request 配置格式错误: {}",
+                redact_script_error(&e, &known_secrets)
+            ),
+            format!(
+                "Invalid request config format: {}",
+                redact_script_error(&e, &known_secrets)
+            ),
         )
     })?;
 
@@ -138,7 +241,7 @@ pub async fn execute_usage_script(
     validate_request_url(&request.url, base_url, is_custom_template)?;
 
     // 6. 发送 HTTP 请求
-    let response_data = send_http_request(&request, timeout_secs).await?;
+    let response_data = send_http_request(&request, timeout_secs, &known_secrets).await?;
 
     // 7. 在独立作用域中执行 extractor（确保 Runtime/Context 在函数结束前释放）
     let result: Value = {
@@ -146,18 +249,88 @@ pub async fn execute_usage_script(
         let context = Context::full(&runtime).map_err(|e| {
             AppError::localized(
                 "usage_script.context_create_failed",
-                format!("创建 JS 上下文失败: {e}"),
-                format!("Failed to create JS context: {e}"),
+                format!(
+                    "创建 JS 上下文失败: {}",
+                    redact_script_error(&e, &known_secrets)
+                ),
+                format!(
+                    "Failed to create JS context: {}",
+                    redact_script_error(&e, &known_secrets)
+                ),
             )
         })?;
 
         context.with(|ctx| {
+            let globals = ctx.globals();
+            globals.set("__ccsApiKey", api_key).map_err(|e| {
+                AppError::localized(
+                    "usage_script.variable_bind_failed",
+                    format!(
+                        "绑定 apiKey 失败: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Failed to bind apiKey: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                )
+            })?;
+            globals.set("__ccsBaseUrl", base_url).map_err(|e| {
+                AppError::localized(
+                    "usage_script.variable_bind_failed",
+                    format!(
+                        "绑定 baseUrl 失败: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Failed to bind baseUrl: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                )
+            })?;
+            globals
+                .set("__ccsAccessToken", access_token.unwrap_or(""))
+                .map_err(|e| {
+                    AppError::localized(
+                        "usage_script.variable_bind_failed",
+                        format!(
+                            "绑定 accessToken 失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to bind accessToken: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                    )
+                })?;
+            globals
+                .set("__ccsUserId", user_id.unwrap_or(""))
+                .map_err(|e| {
+                    AppError::localized(
+                        "usage_script.variable_bind_failed",
+                        format!(
+                            "绑定 userId 失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to bind userId: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                    )
+                })?;
+
             // 重新 eval 获取配置对象
-            let config: rquickjs::Object = ctx.eval(script_with_vars.clone()).map_err(|e| {
+            let config: rquickjs::Object = ctx.eval(bound_script.as_str()).map_err(|e| {
                 AppError::localized(
                     "usage_script.config_reparse_failed",
-                    format!("重新解析配置失败: {e}"),
-                    format!("Failed to re-parse config: {e}"),
+                    format!(
+                        "重新解析配置失败: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Failed to re-parse config: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
                 )
             })?;
 
@@ -165,8 +338,14 @@ pub async fn execute_usage_script(
             let extractor: Function = config.get("extractor").map_err(|e| {
                 AppError::localized(
                     "usage_script.extractor_missing",
-                    format!("缺少 extractor 函数: {e}"),
-                    format!("Missing extractor function: {e}"),
+                    format!(
+                        "缺少 extractor 函数: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Missing extractor function: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
                 )
             })?;
 
@@ -175,8 +354,14 @@ pub async fn execute_usage_script(
                 ctx.json_parse(response_data.as_str()).map_err(|e| {
                     AppError::localized(
                         "usage_script.response_parse_failed",
-                        format!("解析响应 JSON 失败: {e}"),
-                        format!("Failed to parse response JSON: {e}"),
+                        format!(
+                            "解析响应 JSON 失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to parse response JSON: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
                     )
                 })?;
 
@@ -184,8 +369,14 @@ pub async fn execute_usage_script(
             let result_js: rquickjs::Value = extractor.call((response_js,)).map_err(|e| {
                 AppError::localized(
                     "usage_script.extractor_exec_failed",
-                    format!("执行 extractor 失败: {e}"),
-                    format!("Failed to execute extractor: {e}"),
+                    format!(
+                        "执行 extractor 失败: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
+                    format!(
+                        "Failed to execute extractor: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
                 )
             })?;
 
@@ -195,8 +386,14 @@ pub async fn execute_usage_script(
                 .map_err(|e| {
                     AppError::localized(
                         "usage_script.result_serialize_failed",
-                        format!("序列化结果失败: {e}"),
-                        format!("Failed to serialize result: {e}"),
+                        format!(
+                            "序列化结果失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to serialize result: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
                     )
                 })?
                 .ok_or_else(|| {
@@ -210,8 +407,14 @@ pub async fn execute_usage_script(
                 .map_err(|e| {
                     AppError::localized(
                         "usage_script.get_string_failed",
-                        format!("获取字符串失败: {e}"),
-                        format!("Failed to get string: {e}"),
+                        format!(
+                            "获取字符串失败: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
+                        format!(
+                            "Failed to get string: {}",
+                            redact_script_error(&e, &known_secrets)
+                        ),
                     )
                 })?;
 
@@ -219,8 +422,11 @@ pub async fn execute_usage_script(
             serde_json::from_str(&result_json).map_err(|e| {
                 AppError::localized(
                     "usage_script.json_parse_failed",
-                    format!("JSON 解析失败: {e}"),
-                    format!("JSON parse failed: {e}"),
+                    format!("JSON 解析失败: {}", redact_script_error(&e, &known_secrets)),
+                    format!(
+                        "JSON parse failed: {}",
+                        redact_script_error(&e, &known_secrets)
+                    ),
                 )
             })
         })?
@@ -244,7 +450,11 @@ struct RequestConfig {
 }
 
 /// 发送 HTTP 请求
-async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<String, AppError> {
+async fn send_http_request(
+    config: &RequestConfig,
+    timeout_secs: u64,
+    known_secrets: &[String],
+) -> Result<String, AppError> {
     // 使用全局 HTTP 客户端（已包含代理配置）
     let client = crate::proxy::http_client::get();
     // 约束超时范围，防止异常配置导致长时间阻塞（最小 2 秒，最大 30 秒）
@@ -254,8 +464,14 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
     let method: reqwest::Method = config.method.parse().map_err(|_| {
         AppError::localized(
             "usage_script.invalid_http_method",
-            format!("不支持的 HTTP 方法: {}", config.method),
-            format!("Unsupported HTTP method: {}", config.method),
+            format!(
+                "不支持的 HTTP 方法: {}",
+                redact_script_error(&config.method, known_secrets)
+            ),
+            format!(
+                "Unsupported HTTP method: {}",
+                redact_script_error(&config.method, known_secrets)
+            ),
         )
     })?;
 
@@ -277,8 +493,8 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
     let resp = req.send().await.map_err(|e| {
         AppError::localized(
             "usage_script.request_failed",
-            format!("请求失败: {e}"),
-            format!("Request failed: {e}"),
+            format!("请求失败: {}", redact_script_error(&e, known_secrets)),
+            format!("Request failed: {}", redact_script_error(&e, known_secrets)),
         )
     })?;
 
@@ -286,8 +502,11 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
     let text = resp.text().await.map_err(|e| {
         AppError::localized(
             "usage_script.read_response_failed",
-            format!("读取响应失败: {e}"),
-            format!("Failed to read response: {e}"),
+            format!("读取响应失败: {}", redact_script_error(&e, known_secrets)),
+            format!(
+                "Failed to read response: {}",
+                redact_script_error(&e, known_secrets)
+            ),
         )
     })?;
 
@@ -301,6 +520,7 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
         } else {
             text.clone()
         };
+        let preview = redact_script_error(&preview, known_secrets);
         return Err(AppError::localized(
             "usage_script.http_error",
             format!("HTTP {status} : {preview}"),
@@ -422,25 +642,155 @@ fn validate_single_usage(result: &Value) -> Result<(), AppError> {
 }
 
 /// 构建替换变量后的脚本，保持与旧版脚本的兼容性
-fn build_script_with_vars(
-    script_code: &str,
-    api_key: &str,
-    base_url: &str,
-    access_token: Option<&str>,
-    user_id: Option<&str>,
-) -> String {
-    let mut replaced = script_code
-        .replace("{{apiKey}}", api_key)
-        .replace("{{baseUrl}}", base_url);
+fn redact_script_error(error: impl std::fmt::Display, known_secrets: &[String]) -> String {
+    crate::redact_known_secrets(&error.to_string(), known_secrets)
+}
 
-    if let Some(token) = access_token {
-        replaced = replaced.replace("{{accessToken}}", token);
+fn template_identifier(name: &str) -> Option<&'static str> {
+    match name {
+        "apiKey" => Some("__ccsApiKey"),
+        "baseUrl" => Some("__ccsBaseUrl"),
+        "accessToken" => Some("__ccsAccessToken"),
+        "userId" => Some("__ccsUserId"),
+        _ => None,
     }
-    if let Some(uid) = user_id {
-        replaced = replaced.replace("{{userId}}", uid);
+}
+
+/// Replace placeholders with references to QuickJS globals without inserting
+/// their values into source text.  Placeholders in quoted strings become a
+/// concatenation expression (`"Bearer " + __ccsApiKey`); bare placeholders
+/// become the identifier directly.  Template literals use `${...}`.
+fn bind_template_vars(script_code: &str) -> String {
+    const OPEN: [char; 3] = ['\'', '"', '`'];
+    let chars: Vec<char> = script_code.chars().collect();
+    let mut output = String::with_capacity(script_code.len() + 32);
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let current = chars[index];
+        if OPEN.contains(&current) {
+            let quote = current;
+            let start = index;
+            index += 1;
+            let mut escaped = false;
+            let mut placeholder_found = false;
+            let mut segments: Vec<String> = Vec::new();
+            let mut identifiers: Vec<&'static str> = Vec::new();
+            let mut segment_start = index;
+
+            while index < chars.len() {
+                let character = chars[index];
+                if !escaped && character == quote {
+                    break;
+                }
+                if !escaped
+                    && character == '{'
+                    && index + 1 < chars.len()
+                    && chars[index + 1] == '{'
+                {
+                    if let Some(end) = chars[index + 2..]
+                        .windows(2)
+                        .position(|pair| pair == ['}', '}'])
+                    {
+                        let name_end = index + 2 + end;
+                        let name: String = chars[index + 2..name_end].iter().collect();
+                        if let Some(identifier) = template_identifier(name.trim()) {
+                            placeholder_found = true;
+                            segments.push(chars[segment_start..index].iter().collect());
+                            identifiers.push(identifier);
+                            index = name_end + 2;
+                            segment_start = index;
+                            escaped = false;
+                            continue;
+                        }
+                    }
+                }
+                escaped = !escaped && character == '\\';
+                index += 1;
+            }
+
+            if index >= chars.len() {
+                // Unterminated strings are left untouched so QuickJS reports
+                // the original syntax location.
+                output.extend(chars[start..].iter());
+                break;
+            }
+
+            if !placeholder_found {
+                output.extend(chars[start..=index].iter());
+            } else if quote == '`' {
+                // A template literal can safely interpolate globals directly.
+                let mut raw: String = chars[start + 1..index].iter().collect();
+                for identifier in identifiers {
+                    let marker = match identifier {
+                        "__ccsApiKey" => "apiKey",
+                        "__ccsBaseUrl" => "baseUrl",
+                        "__ccsAccessToken" => "accessToken",
+                        "__ccsUserId" => "userId",
+                        _ => unreachable!(),
+                    };
+                    raw = raw.replacen(
+                        &format!("{{{{{marker}}}}}"),
+                        &format!("${{{identifier}}}"),
+                        1,
+                    );
+                }
+                output.push('`');
+                output.push_str(&raw);
+                output.push('`');
+            } else {
+                output.push('(');
+                for (position, segment) in segments.iter().enumerate() {
+                    if !segment.is_empty() {
+                        if position > 0 {
+                            output.push_str(" + ");
+                        }
+                        output.push(quote);
+                        output.push_str(segment);
+                        output.push(quote);
+                    }
+                    if position < identifiers.len() {
+                        if position > 0 || !segment.is_empty() {
+                            output.push_str(" + ");
+                        }
+                        output.push_str(identifiers[position]);
+                    }
+                }
+                let tail: String = chars[segment_start..index].iter().collect();
+                if !tail.is_empty() {
+                    if !identifiers.is_empty() {
+                        output.push_str(" + ");
+                    }
+                    output.push(quote);
+                    output.push_str(&tail);
+                    output.push(quote);
+                }
+                output.push(')');
+            }
+            index += 1;
+            continue;
+        }
+
+        if current == '{' && index + 1 < chars.len() && chars[index + 1] == '{' {
+            if let Some(end) = chars[index + 2..]
+                .windows(2)
+                .position(|pair| pair == ['}', '}'])
+            {
+                let name_end = index + 2 + end;
+                let name: String = chars[index + 2..name_end].iter().collect();
+                if let Some(identifier) = template_identifier(name.trim()) {
+                    output.push_str(identifier);
+                    index = name_end + 2;
+                    continue;
+                }
+            }
+        }
+
+        output.push(current);
+        index += 1;
     }
 
-    replaced
+    output
 }
 
 /// 验证 base_url 的基本安全性
@@ -597,6 +947,8 @@ fn is_loopback_host(url: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn test_https_bypass_prevention() {
@@ -723,6 +1075,95 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(15),
             "interruption took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn template_binding_keeps_special_secrets_out_of_javascript_source() {
+        let script = r#"({
+            request: {
+                url: "{{baseUrl}}/usage",
+                method: "GET",
+                headers: { Authorization: "Bearer {{apiKey}}", "X-Token": '{{accessToken}}' },
+                body: '{"user":"{{userId}}"}'
+            }
+        })"#;
+        let bound = bind_template_vars(script);
+
+        for secret in [
+            "key-with-\"quote\\slash",
+            "https://api.example.test",
+            "token-with-newline\nvalue",
+            "user-123",
+        ] {
+            assert!(!bound.contains(secret));
+        }
+        assert!(bound.contains("__ccsApiKey"));
+        assert!(bound.contains("__ccsBaseUrl"));
+        assert!(bound.contains("__ccsAccessToken"));
+        assert!(bound.contains("__ccsUserId"));
+
+        let runtime = Runtime::new().expect("runtime");
+        let context = Context::full(&runtime).expect("context");
+        context.with(|ctx| {
+            let globals = ctx.globals();
+            globals
+                .set("__ccsApiKey", "key-with-\"quote\\slash")
+                .unwrap();
+            globals
+                .set("__ccsBaseUrl", "https://api.example.test")
+                .unwrap();
+            globals
+                .set("__ccsAccessToken", "token-with-newline\nvalue")
+                .unwrap();
+            globals.set("__ccsUserId", "user-123").unwrap();
+            let _: rquickjs::Object = ctx.eval(bound.as_str()).expect("bound script parses");
+        });
+    }
+
+    #[tokio::test]
+    async fn http_error_preview_redacts_known_secret() {
+        let secret = "sk-usage-script-secret-123456".to_string();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local test server");
+        let address = listener.local_addr().expect("read local test address");
+        let response_body = format!("upstream rejected {secret}");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept test request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write test response");
+        });
+
+        let config = RequestConfig {
+            url: format!("http://{address}/usage?apiKey={secret}"),
+            method: "GET".to_string(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let error = send_http_request(&config, 2, std::slice::from_ref(&secret))
+            .await
+            .expect_err("non-success response must be returned as an error")
+            .to_string();
+
+        server.await.expect("test server task");
+        assert!(
+            !error.contains(&secret),
+            "HTTP errors must redact secrets: {error}"
+        );
+        assert!(
+            error.contains("[REDACTED]"),
+            "redaction marker missing: {error}"
         );
     }
 }

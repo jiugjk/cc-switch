@@ -1115,9 +1115,6 @@ fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<(), AppError> {
     for snapshot in snapshots {
         match &snapshot.content {
             Some(content) => {
-                if let Some(parent) = snapshot.path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-                }
                 atomic_write(&snapshot.path, content)?;
             }
             None => {

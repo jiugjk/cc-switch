@@ -9,6 +9,7 @@
 //! a direct (non-proxied) CLI request.
 
 use super::{
+    auth_layer,
     failover_switch::FailoverSwitchManager,
     handlers,
     log_codes::srv as log_srv,
@@ -125,11 +126,24 @@ impl ProxyServer {
         // 保存关闭句柄
         *self.shutdown_tx.write().await = Some(shutdown_tx);
 
+        let non_loopback_listener =
+            auth_layer::is_non_loopback_bind_address(&self.config.listen_address);
+        if non_loopback_listener {
+            log::warn!(
+                "代理监听非回环地址 {}；远程请求必须携带网关令牌",
+                self.config.listen_address
+            );
+        }
+
         // 更新状态
         let mut status = self.state.status.write().await;
         status.running = true;
         status.address = self.config.listen_address.clone();
         status.port = actual_port;
+        // This flag describes the network exposure surface, not whether the
+        // middleware is enabled. Remote requests are token-protected even
+        // when this is true, but the UI should still make the exposure visible.
+        status.insecure_exposure = non_loopback_listener;
         drop(status);
 
         // 记录启动时间
@@ -143,7 +157,7 @@ impl ProxyServer {
             loop {
                 tokio::select! {
                     result = listener.accept() => {
-                        let (stream, _remote_addr) = match result {
+                        let (stream, remote_addr) = match result {
                             Ok(v) => v,
                             Err(e) => {
                                 log::error!("[{SRV}] accept 失败: {e}", SRV = log_srv::ACCEPT_ERR);
@@ -184,6 +198,9 @@ impl ProxyServer {
 
                                     // Insert our own header case map alongside hyper's internal one
                                     parts.extensions.insert(cases);
+                                    // The auth middleware uses the peer address to preserve
+                                    // loopback zero-configuration while protecting remote peers.
+                                    parts.extensions.insert(remote_addr);
 
                                     let body = axum::body::Body::new(body);
                                     let axum_req = http::Request::from_parts(parts, body);
@@ -208,7 +225,9 @@ impl ProxyServer {
             }
 
             // 服务器停止后更新状态
-            state.status.write().await.running = false;
+            let mut status = state.status.write().await;
+            status.running = false;
+            status.insecure_exposure = false;
             *state.start_time.write().await = None;
         });
 
@@ -289,9 +308,10 @@ impl ProxyServer {
     }
 
     fn build_router(&self) -> Router {
-        Router::new()
-            // 健康检查
-            .route("/health", get(handlers::health_check))
+        // Keep health public so process supervisors can probe the listener
+        // without having to know the gateway token. Every other endpoint is
+        // protected for non-loopback peers by the nested middleware.
+        let protected = Router::new()
             .route("/status", get(handlers::get_status))
             // Claude API (支持带前缀和不带前缀两种格式)
             .route("/v1/messages", post(handlers::handle_messages))
@@ -364,6 +384,14 @@ impl ProxyServer {
             .route("/gemini/v1beta/*path", any(handlers::handle_gemini))
             // Gemini 的 GA 版本也叫 /v1，给原 SDK 留一条出口
             .route("/gemini/v1/*path", any(handlers::handle_gemini))
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                auth_layer::require_gateway_token,
+            ));
+
+        Router::new()
+            .route("/health", get(handlers::health_check))
+            .merge(protected)
             // 提高默认请求体大小限制（避免 413 Payload Too Large）
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
             .with_state(self.state.clone())

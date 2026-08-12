@@ -534,8 +534,28 @@ export function DeepLinkImportDialog() {
                         </div>
                       </div>
 
+                      {parsedConfig?.oversized && (
+                        <div
+                          role="alert"
+                          data-testid="deeplink-config-preview-warning"
+                          className="rounded-md border border-yellow-500/30 bg-yellow-50 p-3 text-xs text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200"
+                        >
+                          {t("deeplink.configPreviewTooLarge")}
+                        </div>
+                      )}
+
+                      {!parsedConfig && (
+                        <div
+                          role="alert"
+                          data-testid="deeplink-config-preview-warning"
+                          className="rounded-md border border-yellow-500/30 bg-yellow-50 p-3 text-xs text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200"
+                        >
+                          {t("deeplink.configPreviewUnavailable")}
+                        </div>
+                      )}
+
                       {/* Parsed Config Details */}
-                      {parsedConfig && (
+                      {parsedConfig && !parsedConfig.oversized && (
                         <div className="rounded-lg bg-muted/50 p-3 space-y-2">
                           <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                             {t("deeplink.configDetails")}

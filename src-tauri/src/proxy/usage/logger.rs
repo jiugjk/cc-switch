@@ -10,6 +10,7 @@ use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
 struct UsageSemantic {
@@ -220,6 +221,89 @@ impl<'a> UsageLogger<'a> {
         }
 
         Ok(())
+    }
+
+    /// Persist a completed usage record without running SQLite on an async
+    /// request worker. Pricing lookup, cost calculation, and insertion stay in
+    /// the same blocking task so callers cannot accidentally reintroduce a
+    /// synchronous database hop between them.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn log_with_resolved_pricing(
+        db: Arc<Database>,
+        request_id: String,
+        provider_id: String,
+        app_type: String,
+        model: String,
+        request_model: String,
+        outbound_model: String,
+        usage: TokenUsage,
+        latency_ms: u64,
+        first_token_ms: Option<u64>,
+        status_code: u16,
+        session_id: Option<String>,
+        provider_type: Option<String>,
+        is_streaming: bool,
+    ) -> Result<(), AppError> {
+        db.spawn(move |db| {
+            let logger = UsageLogger::new(db);
+            let (multiplier, pricing_model_source) =
+                futures::executor::block_on(logger.resolve_pricing_config(&provider_id, &app_type));
+            let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
+                outbound_model
+            } else {
+                model.clone()
+            };
+
+            logger.log_with_calculation(
+                request_id,
+                provider_id,
+                app_type,
+                model,
+                request_model,
+                pricing_model,
+                usage,
+                multiplier,
+                latency_ms,
+                first_token_ms,
+                status_code,
+                session_id,
+                provider_type,
+                is_streaming,
+            )
+        })
+        .await
+    }
+
+    /// Persist an error record on the database blocking pool.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn log_error_with_context_async(
+        db: Arc<Database>,
+        request_id: String,
+        provider_id: String,
+        app_type: String,
+        model: String,
+        status_code: u16,
+        error_message: String,
+        latency_ms: u64,
+        is_streaming: bool,
+        session_id: Option<String>,
+        provider_type: Option<String>,
+    ) -> Result<(), AppError> {
+        db.spawn(move |db| {
+            UsageLogger::new(db).log_error_with_context(
+                request_id,
+                provider_id,
+                app_type,
+                model,
+                status_code,
+                error_message,
+                latency_ms,
+                is_streaming,
+                session_id,
+                provider_type,
+            )
+        })
+        .await
     }
 
     fn load_existing_semantic(

@@ -130,5 +130,5 @@ CC Switch User Manual
 
 Feel free to submit Issues or PRs to improve the documentation:
 
-- [GitHub Issues](https://github.com/farion1231/cc-switch/issues)
-- [GitHub Repository](https://github.com/farion1231/cc-switch)
+- [GitHub Issues](https://github.com/jiugjk/cc-switch/issues)
+- [GitHub Repository](https://github.com/jiugjk/cc-switch)

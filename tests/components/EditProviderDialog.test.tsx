@@ -202,4 +202,81 @@ describe("EditProviderDialog", () => {
       JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
     ).toEqual(provider.settingsConfig);
   });
+
+  it("live 配置只有空壳时回退数据库配置", async () => {
+    const provider: Provider = {
+      id: "claude-provider",
+      name: "Claude Provider",
+      category: "custom",
+      settingsConfig: {
+        env: {
+          ANTHROPIC_AUTH_TOKEN: "db-token",
+          ANTHROPIC_BASE_URL: "https://db.example",
+        },
+      },
+    };
+
+    apiMocks.getCurrent.mockResolvedValue(provider.id);
+    apiMocks.getLiveProviderSettings.mockResolvedValue({
+      env: {},
+      config: { nested: [] },
+    });
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="claude"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+      ).toEqual(provider.settingsConfig);
+    });
+  });
+
+  it("Codex live 缺少 auth 时保留数据库凭据并采用 live config", async () => {
+    const provider: Provider = {
+      id: "codex-provider",
+      name: "Codex Provider",
+      category: "custom",
+      settingsConfig: {
+        auth: {
+          OPENAI_API_KEY: "db-key",
+          account_id: "db-account",
+        },
+        config: 'model_provider = "custom"\nmodel = "gpt-5-old"\n',
+      },
+    };
+    const liveConfig = 'model_provider = "custom"\nmodel = "gpt-5-live"\n';
+
+    apiMocks.getCurrent.mockResolvedValue(provider.id);
+    apiMocks.getLiveProviderSettings.mockResolvedValue({
+      auth: {},
+      config: liveConfig,
+    });
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="codex"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+      ).toEqual({
+        auth: provider.settingsConfig.auth,
+        config: liveConfig,
+      });
+    });
+  });
 });
