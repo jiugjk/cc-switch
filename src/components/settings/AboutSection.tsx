@@ -766,6 +766,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const handleCancelUpgrade = useCallback(() => setPendingUpgrade(null), []);
 
   const displayVersion = version ?? t("common.unknown");
+  const buildNumber = import.meta.env.VITE_BUILD_NUMBER;
 
   // 任一安装/升级进行中（批量或单工具）即视为忙碌：用于禁用所有操作按钮，
   // 避免并发触发多个 npm/pip 全局写入造成冲突。
@@ -813,7 +814,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                   {isLoadingVersion ? (
                     <Loader2 className="h-3 w-3 animate-spin" />
                   ) : (
-                    <span className="font-medium">{`v${displayVersion}`}</span>
+                    <span className="font-medium">
+                      {`v${displayVersion}${buildNumber ? ` (${buildNumber})` : ""}`}
+                    </span>
                   )}
                 </Badge>
                 {isPortable && (

@@ -99,6 +99,8 @@ jobs:
       # override as defense in depth against the flag being re-enabled.
       - name: Build Tauri app
         shell: bash
+        env:
+          VITE_BUILD_NUMBER: ${{ github.run_number }}
         run: pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}' --bundles nsis,msi
 
       - name: Collect release assets
@@ -112,7 +114,8 @@ jobs:
             cp "$f" "dist-release/$(basename "$f")"
           done
           for f in src-tauri/target/release/bundle/msi/*.msi; do
-            cp "$f" "dist-release/$(basename "$f")"
+            base=$(basename "$f" .msi)
+            cp "$f" "dist-release/${base%_en-US}.msi"
           done
           # Portable: the top-level release exe (not the nsis installer already copied)
           for f in src-tauri/target/release/*.exe; do
@@ -144,7 +147,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: cc-switch-windows-x64-msi-${{ steps.rev.outputs.sha }}
-          path: src-tauri/target/release/bundle/msi/*.msi
+          path: dist-release/*.msi
           if-no-files-found: error
 
       - name: Upload portable executable
