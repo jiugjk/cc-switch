@@ -17,7 +17,8 @@ import { useProxyStatus } from "@/hooks/useProxyStatus";
  */
 export function ProxyStatusSummary() {
   const { t } = useTranslation();
-  const { status, isRunning, isTakeoverActive } = useProxyStatus();
+  const { status, isRunning, takeoverStatus } = useProxyStatus();
+  const isTakeoverActive = Object.values(takeoverStatus ?? {}).some(Boolean);
 
   // 代理从未启动过且无任何路由/流量痕迹时，不占用 General 页空间。
   // get_proxy_status 在停止时仍返回 Default 对象，不能仅用 `!status`。
