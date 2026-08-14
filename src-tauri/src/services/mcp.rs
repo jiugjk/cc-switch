@@ -183,7 +183,7 @@ impl McpService {
             AppType::GrokBuild => Some(crate::grok_config::get_grok_config_path()),
             AppType::OpenCode => Some(crate::opencode_config::get_opencode_config_path()),
             AppType::Hermes => Some(crate::hermes_config::get_hermes_config_path()),
-            AppType::ClaudeDesktop | AppType::OpenClaw => None,
+            AppType::ClaudeDesktop | AppType::OpenClaw | AppType::Pi => None,
         }
     }
 
@@ -285,6 +285,7 @@ impl McpService {
             AppType::Hermes => {
                 mcp::sync_single_server_to_hermes(&Default::default(), &server.id, &server.server)?;
             }
+            AppType::Pi => {}
         }
         Ok(())
     }
@@ -321,6 +322,7 @@ impl McpService {
             AppType::Hermes => {
                 mcp::remove_server_from_hermes(id)?;
             }
+            AppType::Pi => {}
         }
         Ok(())
     }
@@ -365,7 +367,10 @@ impl McpService {
         servers: &IndexMap<String, McpServer>,
         app: &AppType,
     ) -> Result<(), AppError> {
-        if matches!(app, AppType::OpenClaw | AppType::ClaudeDesktop) {
+        if matches!(
+            app,
+            AppType::OpenClaw | AppType::ClaudeDesktop | AppType::Pi
+        ) {
             return Ok(());
         }
 

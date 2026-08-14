@@ -54,6 +54,7 @@ const allVisible: VisibleApps = {
   opencode: true,
   openclaw: true,
   hermes: true,
+  pi: true,
 };
 
 interface WrapperProps {

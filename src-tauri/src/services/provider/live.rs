@@ -186,6 +186,7 @@ pub(crate) fn provider_exists_in_live_config(
             .map(|providers| providers.contains_key(provider_id)),
         AppType::Hermes => crate::hermes_config::get_providers()
             .map(|providers| providers.contains_key(provider_id)),
+        AppType::Pi => crate::pi_config::pi_provider_exists(provider_id),
         _ => Ok(false),
     }
 }
@@ -527,6 +528,7 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
+        | AppType::Pi
         | AppType::ClaudeDesktop => false,
     }
 }
@@ -601,6 +603,7 @@ pub(crate) fn remove_common_config_from_settings(
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
+        | AppType::Pi
         | AppType::ClaudeDesktop => Ok(settings.clone()),
     }
 }
@@ -660,6 +663,7 @@ fn apply_common_config_to_settings(
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
+        | AppType::Pi
         | AppType::ClaudeDesktop => Ok(settings.clone()),
     }
 }
@@ -896,10 +900,10 @@ fn preserve_nonempty_db_credential_sections(
         AppType::Claude | AppType::Gemini => merge_section(settings_obj, "env"),
         AppType::Codex => merge_section(settings_obj, "auth"),
         AppType::OpenCode => merge_section(settings_obj, "options"),
-        AppType::OpenClaw | AppType::Hermes => {
-            // OpenClaw uses camelCase, Hermes uses snake_case.  Preserve only
-            // provider credential/endpoint fields; models and other live-owned
-            // metadata remain authoritative from the live snapshot.
+        AppType::OpenClaw | AppType::Hermes | AppType::Pi => {
+            // OpenClaw uses camelCase, Hermes uses snake_case, Pi uses either.
+            // Preserve only provider credential/endpoint fields; models and
+            // other live-owned metadata remain authoritative from the live snapshot.
             for key in ["apiKey", "baseUrl", "api_key", "base_url"] {
                 let Some(stored_value) = stored.get(key) else {
                     continue;
@@ -1246,6 +1250,7 @@ fn provider_live_file_paths(app_type: &AppType) -> Result<Vec<PathBuf>, AppError
         AppType::OpenCode => Ok(vec![crate::opencode_config::get_opencode_config_path()]),
         AppType::OpenClaw => Ok(vec![crate::openclaw_config::get_openclaw_config_path()]),
         AppType::Hermes => Ok(vec![crate::hermes_config::get_hermes_config_path()]),
+        AppType::Pi => Ok(vec![crate::pi_config::get_pi_models_path()?]),
     }
 }
 
@@ -1399,6 +1404,11 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())?;
             log::debug!("Hermes provider '{}' written to live config", provider.id);
         }
+        AppType::Pi => {
+            return Err(AppError::InvalidInput(
+                "Pi providers use the Pi provider service".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1535,6 +1545,9 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
 
     // Sync providers based on mode
     for app_type in AppType::all() {
+        if matches!(app_type, AppType::Pi) {
+            continue;
+        }
         let result = if app_type.is_additive_mode() {
             // Additive mode: sync ALL providers
             sync_all_providers_to_live(state, &app_type)
@@ -1687,6 +1700,9 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             let config = crate::hermes_config::yaml_to_json(&yaml_config)?;
             Ok(config)
         }
+        AppType::Pi => Err(AppError::InvalidInput(
+            "Pi providers are read from Pi's native models file".to_string(),
+        )),
     }
 }
 
@@ -1797,7 +1813,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
             })
         }
         // OpenCode, OpenClaw and Hermes use additive mode and are handled by early return above
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi => {
             unreachable!("additive mode apps are handled by early return")
         }
     };

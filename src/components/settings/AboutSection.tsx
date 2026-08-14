@@ -68,6 +68,7 @@ const TOOL_NAMES = [
   "opencode",
   "openclaw",
   "hermes",
+  "pi",
 ] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 type ToolLifecycleAction = "install" | "update";
@@ -123,7 +124,9 @@ ${posixScriptInstallCommand("https://opencode.ai/install")} || npm i -g opencode
 # OpenClaw
 npm i -g openclaw@latest
 # Hermes
-${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh")}`;
+${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh")}
+# Pi
+npm i -g @earendil-works/pi-coding-agent@latest`;
 
 const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 irm https://claude.ai/install.ps1 | iex
@@ -145,7 +148,10 @@ curl -fsSL https://opencode.ai/install | bash
 curl -fsSL https://openclaw.ai/install.sh | bash
 
 # Hermes (Nous Research)
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)`;
+iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+
+# Pi
+npm i -g @earendil-works/pi-coding-agent@latest`;
 
 const ONE_CLICK_INSTALL_COMMANDS = isWindows()
   ? WINDOWS_ONE_CLICK_INSTALL_COMMANDS
@@ -159,6 +165,7 @@ const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
+  pi: "Pi",
 };
 
 // 各工具官网，展示在环境检测卡片的工具名右侧（外链图标，经系统浏览器打开）。
@@ -170,6 +177,7 @@ const TOOL_WEBSITES: Record<ToolName, string> = {
   opencode: "https://opencode.ai",
   openclaw: "https://openclaw.ai",
   hermes: "https://hermes-agent.nousresearch.com",
+  pi: "https://github.com/earendil-works/pi",
 };
 
 // 后端 NOT_INSTALLED 哨兵串保持英文原文（日志/外部脚本可能依赖），仅在展示层
@@ -194,6 +202,7 @@ const TOOL_APP_IDS: Record<ToolName, AppId> = {
   opencode: "opencode",
   openclaw: "openclaw",
   hermes: "hermes",
+  pi: "pi",
 };
 
 // 工具版本探测代价高：每个工具一次 `--version` 子进程 + 一次 npm/github/pypi 网络请求。

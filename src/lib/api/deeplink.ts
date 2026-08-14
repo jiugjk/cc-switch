@@ -5,7 +5,7 @@ export type ResourceType = "provider" | "prompt" | "mcp" | "skill";
 
 /**
  * Apps accepted by the backend deeplink parser (src-tauri/src/deeplink/parser.rs):
- * claude | codex | gemini | grokbuild | opencode | openclaw | hermes.
+ * claude | codex | gemini | grokbuild | opencode | openclaw | hermes | pi.
  * Note: `claude-desktop` exists as an AppId but is rejected by the deeplink parser.
  */
 export type DeepLinkAppId = Exclude<AppId, "claude-desktop">;
