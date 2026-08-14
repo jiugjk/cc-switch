@@ -821,13 +821,8 @@ async fn get_single_tool_version_impl(
             "openclaw" => fetch_npm_latest_for_tool(&client, "openclaw", tool, local).await,
             "hermes" => fetch_pypi_latest_version(&client, "hermes-agent").await,
             "pi" => {
-                fetch_npm_latest_for_tool(
-                    &client,
-                    "@earendil-works/pi-coding-agent",
-                    tool,
-                    local,
-                )
-                .await
+                fetch_npm_latest_for_tool(&client, "@earendil-works/pi-coding-agent", tool, local)
+                    .await
             }
             _ => None,
         }
