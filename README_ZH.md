@@ -2,7 +2,7 @@
 
 # CC Switch
 
-### Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes Agent 的全方位管理工具
+### Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes 与 Pi 的全方位管理工具
 
 [![Version](https://img.shields.io/github/v/release/jiugjk/cc-switch?color=blue&label=version)](https://github.com/jiugjk/cc-switch/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](https://github.com/jiugjk/cc-switch/releases)
@@ -14,13 +14,13 @@
 
 ### 🌐 上游项目网站：**[ccswitch.io](https://ccswitch.io)**
 
-[English](README.md) | 中文 | [更新日志](CHANGELOG.md)
+中文 | [English](README_EN.md) | [更新日志](CHANGELOG.md)
 
 </div>
 
 ## 关于此独立发行版
 
-这是一个独立维护的 Windows 发行版，基于 MIT 许可的 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，拥有独立发布节奏，并在上游 v3.19.1 基础上新增以下功能：
+这是一个独立维护的 Windows 发行版，基于 MIT 许可的 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，拥有独立发布节奏。当前版本为 **v3.19.2**，并已合并后续上游提交（含 **Pi** 原生编码代理）。在上游基础上，本发行版额外提供：
 
 ### CodexCont 与代理
 
@@ -32,7 +32,7 @@
 
 ### 应用探测与界面
 
-- **顶部应用切换栏** — 自动隐藏未安装工具；窗口重新获得焦点时重探测；修复非全屏宽度下右侧按钮被挤出屏幕。
+- **顶部应用切换栏** — 自动隐藏未安装工具；窗口重新获得焦点时重探测；应用过多时收入「更多」弹出层，避免右侧按钮被挤出屏幕。
 - **Codex 桌面** — Windows 上检测微软商店 `OpenAI.Codex` 包；端点提示随所选上游 API 格式联动。
 - **检测文案本地化** — `not installed or not executable` 按当前界面语言显示。
 - **工具官网链接** — 工具名旁快捷打开官网。
@@ -47,17 +47,17 @@
 
 ## 为什么选择 CC Switch？
 
-现代 AI 编程依赖于 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes 等工具——但每个工具都有自己的配置格式。切换 API 供应商意味着手动编辑 JSON、TOML 或 `.env` 文件，而在多个工具之间缺乏一个统一管理 MCP, SKILLS 的方式。
+现代 AI 编程依赖于 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes 和 Pi 等工具——但每个工具都有自己的配置格式。切换 API 供应商意味着手动编辑 JSON、TOML 或 `.env` 文件，而在多个工具之间缺乏一个统一管理 MCP、Skills 的方式。
 
-**CC Switch** 为你提供一个桌面应用来管理所有支持的 AI 工具。无需手动编辑配置文件，你将获得一个可视化界面，一键将供应商导入应用，一键在不同的供应商之间进行切换，内置 50+ 供应商预设、统一的 MCP, SKILLS 管理以及系统托盘即时切换功能——所有操作都基于可靠的 SQLite 数据库和原子写入机制，保护你的配置不被损坏。
+**CC Switch** 为你提供一个桌面应用来管理所有支持的 AI 工具。无需手动编辑配置文件，你将获得一个可视化界面，一键将供应商导入应用，一键在不同的供应商之间进行切换，内置 50+ 供应商预设、统一的 MCP / Skills 管理以及系统托盘即时切换功能——所有操作都基于可靠的 SQLite 数据库和原子写入机制，保护你的配置不被损坏。
 
-- **一个应用，八个工具** — 在单一界面中管理 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes
+- **一个应用，九个工具** — 在单一界面中管理 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes 和 Pi
 - **告别手动编辑** — 50+ 供应商预设，包括 AWS Bedrock、NVIDIA NIM 和社区中转服务；一键即可切换
-- **统一 MCP, SKILLS 管理** — 一个面板管理 Claude、Codex、Gemini、Grok Build、OpenCode 和 Hermes 的 MCP, SKILLS, 支持双向同步
+- **统一 MCP / Skills 管理** — 一个面板管理 Claude、Codex、Gemini、Grok Build、OpenCode、Hermes（以及 Skills 侧的 Pi），支持双向同步
 - **系统托盘快速切换** — 从托盘菜单即时切换供应商，无需打开完整应用
-- **云同步** — 通过 Dropbox、OneDrive、iCloud 或 WebDAV 服务器在不同设备之间同步供应商数据
+- **云同步** — 通过 Dropbox、OneDrive、iCloud、WebDAV 或 S3 兼容存储在不同设备之间同步数据
 - **跨平台（上游）** — 上游支持 Windows、macOS 和 Linux；**本发行版已发布安装包仅为 Windows x64**
-- **小工具** - 内置了多种小工具来解决首次安装登录确认、禁止签名、插件拓展同步等多种功能
+- **小工具** — 内置了多种小工具来解决首次安装登录确认、禁止签名、插件拓展同步等多种功能
 
 ## 界面预览
 
@@ -67,12 +67,14 @@
 
 ## 功能特性
 
-[完整更新日志](CHANGELOG.md) | [发布说明](docs/release-notes/v3.19.1-zh.md)
+[完整更新日志](CHANGELOG.md) | [发布说明](docs/release-notes/v3.19.2-zh.md)
 
 ### 供应商管理
 
-- **8 个支持工具，50+ 预设** — Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes；复制 key 即可一键导入
+- **9 个支持工具，50+ 预设** — Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes、Pi；复制 key 即可一键导入
+- **切换模式 / 累加模式** — Claude / Claude Desktop / Codex / Gemini / Grok Build 一次只写入当前供应商；OpenCode / OpenClaw / Hermes / Pi 把全部供应商写入 live 配置
 - **通用供应商** — 一份配置同步到 Claude Code、Codex 和 Gemini CLI
+- **Pi 原生供应商** — 只管理 `models.json` 里的显式供应商节点，不接管 Pi `/login`、`auth.json` 或默认模型。契约说明见 [Pi 原生契约](docs/pi-native-contract-zh.md)
 - 一键切换、系统托盘快速访问、拖拽排序、导入导出
 
 ### 代理与故障转移
@@ -82,31 +84,35 @@
 
 ### MCP、Prompts 与 Skills
 
-- **统一 MCP 面板** — 管理 Claude、Codex、Gemini、Grok Build、OpenCode 和 Hermes 的 MCP 服务器，双向同步，支持 Deep Link 导入
-- **Prompts** — Markdown 编辑器，跨应用同步（CLAUDE.md / AGENTS.md / GEMINI.md），回填保护
-- **Skills** — 从 GitHub 仓库或 ZIP 文件一键安装，自定义仓库管理，支持软连接和文件复制
+- **统一 MCP 面板** — 管理 Claude、Codex、Gemini、Grok Build、OpenCode 和 Hermes 的 MCP 服务器（Pi / OpenClaw / Claude Desktop 无原生 MCP 注册表），双向同步，支持 Deep Link 导入
+- **面板搜索与批量开关** — MCP / Prompts / Skills 可搜索；MCP 与 Skills 可按应用一键批量启用或停用
+- **Prompts** — Markdown 编辑器，跨应用同步（CLAUDE.md / AGENTS.md / GEMINI.md / Hermes `SOUL.md`）；Pi 另支持原生 `SYSTEM.md` 与斜杠命令模板
+- **Skills** — 从 GitHub 仓库或 ZIP 文件一键安装，自定义仓库管理，支持软连接和文件复制（含 Pi）
 
 ### 用量与成本追踪
 
 - **用量仪表盘** — 跨供应商追踪支出、请求数和 Token 用量，趋势图表、详细请求日志和自定义模型定价
+- **models.dev 自动定价** — 可选从 models.dev 同步模型价格，本地覆盖写入 `~/.cc-switch/model-pricing.json`
+- **认证中心** — 逐账号显示 ChatGPT（Codex OAuth）订阅用量；官方 Grok / SuperGrok 配额可显示在供应商卡片上
 
 ### 会话管理器与工作区
 
-- 浏览、搜索和恢复支持的会话来源
+- 浏览、搜索和恢复支持的会话来源（含 Pi 会话）
 - **工作区编辑器**（OpenClaw）— 编辑 Agent 文件（AGENTS.md、SOUL.md 等），支持 Markdown 预览
 
 ### 系统与平台
 
-- **云同步** — 自定义配置目录（Dropbox、OneDrive、iCloud、坚果云、NAS）及 WebDAV 服务器同步
+- **云同步** — 自定义配置目录（Dropbox、OneDrive、iCloud、坚果云、NAS）、WebDAV 以及 S3 兼容存储
 - **Deep Link** (`ccswitch://`) — 通过 URL 一键导入供应商、MCP 服务器、提示词和技能
 - 深色 / 浅色 / 跟随系统主题、开机自启、原子写入、自动备份、国际化（简中/繁中/英/日）
+- **默认界面语言为简体中文**；也可按系统语言或设置切换
 
 ## 常见问题
 
 <details>
 <summary><strong>CC Switch 支持哪些 AI 工具？</strong></summary>
 
-CC Switch 支持八个工具：**Claude Code**、**Claude Desktop**、**Codex**、**Gemini CLI**、**Grok Build**、**OpenCode**、**OpenClaw** 和 **Hermes**。每个工具都有专属的供应商预设和配置管理。
+CC Switch 支持九个工具：**Claude Code**、**Claude Desktop**、**Codex**、**Gemini CLI**、**Grok Build**、**OpenCode**、**OpenClaw**、**Hermes** 和 **Pi**。每个工具都有专属的供应商预设和配置管理。
 
 </details>
 
@@ -120,14 +126,14 @@ CC Switch 支持八个工具：**Claude Code**、**Claude Desktop**、**Codex**�
 <details>
 <summary><strong>切换供应商之后我的插件配置怎么不见了？</strong></summary>
 
-CC Switch 使用“通用配置片段”功能，在不同的供应商之间传递 Key 和请求地址之外的通用数据，您可以在“编辑供应商”菜单的“通用配置面板”里，点击“从当前供应商提取”，把所有的通用数据提取到通用配置中，之后在新建“供应商”的时候，只要勾选“应用通用配置”（默认勾选），就会把插件等数据写入到新的供应商配置中。您的所有配置项都会保存在运行本软件的时候，第一次导入的默认供应商里面，不会丢失。
+CC Switch 使用“通用配置片段”功能，在不同的供应商之间传递 Key 和请求地址之外的通用数据。您可以在“编辑供应商”菜单的“通用配置面板”里，点击“从当前供应商提取”，把所有的通用数据提取到通用配置中，之后在新建“供应商”的时候，只要勾选“应用通用配置”（默认勾选），就会把插件等数据写入到新的供应商配置中。您的所有配置项都会保存在运行本软件的时候，第一次导入的默认供应商里面，不会丢失。
 
 </details>
 
 <details>
-<summary><strong>macOS 安装</strong></summary>
+<summary><strong>Windows 安装时 SmartScreen 提示怎么办？</strong></summary>
 
-CC Switch macOS 版本已通过 Apple 代码签名和公证，可直接下载安装，无需额外操作。推荐使用 `.dmg` 安装包。
+本发行版的安装包**未代码签名**，Windows SmartScreen 可能提示“已阻止”，选择「仍要运行」即可。需要 macOS / Linux 安装包请使用 [上游 Releases](https://github.com/farion1231/cc-switch/releases)。
 
 </details>
 
@@ -143,7 +149,7 @@ CC Switch macOS 版本已通过 Apple 代码签名和公证，可直接下载安
 <details>
 <summary><strong>如何切换回官方登录？</strong></summary>
 
-可以在预设供应商里面添加一个官方供应商。切换过去之后，执行一遍 Log out / Log in 流程，之后便可以在官方供应商和第三方供应商之间随意切换。CodeX 可以在不同官方供应商之间进行切换，方便多个 Plus 或者 Team 账号之间切换。
+可以在预设供应商里面添加一个官方供应商。切换过去之后，执行一遍 Log out / Log in 流程，之后便可以在官方供应商和第三方供应商之间随意切换。Codex 可以在不同官方供应商之间进行切换，方便多个 Plus 或者 Team 账号之间切换。Pi 的登录由 Pi 自己的 `/login` 管理，CC Switch 不读写 `auth.json`。
 
 </details>
 
@@ -153,21 +159,11 @@ CC Switch macOS 版本已通过 Apple 代码签名和公证，可直接下载安
 - **数据库**：`~/.cc-switch/cc-switch.db`（SQLite — 供应商、MCP、提示词、技能）
 - **本地设置**：`~/.cc-switch/settings.json`（设备级 UI 偏好设置）
 - **备份**：`~/.cc-switch/backups/`（自动轮换，保留最近 10 个）
-- **SKILLS**：`~/.cc-switch/skills/`（默认通过软链接连接到对应应用）
+- **Skills**：`~/.cc-switch/skills/`（默认通过软链接连接到对应应用）
 - **技能备份**：`~/.cc-switch/skill-backups/`（卸载前自动创建，保留最近 20 个）
+- **模型定价覆盖**：`~/.cc-switch/model-pricing.json`（可选，models.dev 同步与手工改价）
 
-</details>
-
-<details>
-<summary><strong>Linux（Wayland + NVIDIA）：网页内容点不动、缩放后黑屏</strong></summary>
-
-AppImage 会强制 `GDK_BACKEND=x11`（走 XWayland）以规避历史上的原生 Wayland 崩溃。但在较新的 Wayland + NVIDIA 环境下，这会导致网页内容区点不动（标题栏按钮仍可点）、窗口缩放后黑屏。可用内置的逃生开关切回原生 Wayland：
-
-```bash
-CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
-```
-
-如果你是从桌面图标启动的，请把它写进 `.desktop` 的 `Exec=` 行（如 `env CC_SWITCH_GDK_BACKEND=wayland /path/to/AppImage`），或在会话环境中设置。该变量是通用的：在 tiling Wayland 合成器（sway/Hyprland）下若出现点击失效，可反过来设 `CC_SWITCH_GDK_BACKEND=x11`。不设置则保持默认行为。
+Windows 上 `~` 即用户主目录，例如 `C:\Users\<你>\.cc-switch\`。
 
 </details>
 
@@ -175,23 +171,25 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 如需了解各项功能的详细使用方法，请查阅 **[用户手册](docs/user-manual/zh/README.md)** — 涵盖供应商管理、MCP/Prompts/Skills、代理与故障转移等全部功能。
 
+Pi 接入边界见 [Pi 原生契约](docs/pi-native-contract-zh.md)。Grok Build 配置分层见 [Grok Build 配置指南](docs/guides/grok-build-config-guide-zh.md)。
+
 ## 快速开始
 
 ### 基本使用
 
-1. **添加供应商**：点击"添加供应商" → 选择预设或创建自定义配置
+1. **添加供应商**：点击「添加供应商」→ 选择预设或创建自定义配置
 2. **切换供应商**：
-   - 主界面：选择供应商 → 点击"启用"
+   - 主界面：选择供应商 → 点击「启用」
    - 系统托盘：直接点击供应商名称（立即生效）
-3. **生效方式**：重启终端或对应的 CLI 工具以应用更改（CLaude Code 无需重启）
-4. **恢复官方登录**：添加"官方登录"预设，重启 CLI 工具后按照其登录/OAuth 流程操作
+3. **生效方式**：重启终端或对应的 CLI 工具以应用更改（Claude Code 无需重启）
+4. **恢复官方登录**：添加「官方登录」预设，重启 CLI 工具后按照其登录/OAuth 流程操作
 
 ### MCP、Prompts、Skills 与会话
 
-- **MCP**：点击"MCP"按钮 → 通过模板或自定义配置添加服务器 → 切换各应用同步开关
-- **Prompts**：点击"Prompts" → 使用 Markdown 编辑器创建预设 → 激活后同步到 live 文件
-- **Skills**：点击"Skills" → 浏览 GitHub 仓库 → 一键安装到支持的应用
-- **会话**：点击"Sessions" → 浏览、搜索和恢复支持的会话来源
+- **MCP**：点击「MCP」按钮 → 通过模板或自定义配置添加服务器 → 切换各应用同步开关
+- **Prompts**：点击「Prompts」→ 使用 Markdown 编辑器创建预设 → 激活后同步到 live 文件
+- **Skills**：点击「Skills」→ 浏览 GitHub 仓库 → 一键安装到支持的应用
+- **会话**：点击「Sessions」→ 浏览、搜索和恢复支持的会话来源
 
 > **注意**：首次启动可以手动导入现有 CLI 工具配置作为默认供应商。
 
@@ -214,7 +212,7 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 > **说明**
 > - **未代码签名**：Windows SmartScreen 可能提示，选「仍要运行」即可。
 > - **无自动更新通道**：本发行版已移除应用内更新器（`createUpdaterArtifacts` 为 false、无 `plugins.updater` 配置、无签名密钥），「检查更新」会打开本发行版发布页手动下载。
-> - 自动构建标签形如 `v3.19.1-windows.<run_number>`，并指向实际构建的提交。
+> - 自动构建标签形如 `v3.19.2-windows.<run_number>`，并指向实际构建的提交。
 
 <details>
 <summary><strong>架构总览</strong></summary>
@@ -244,7 +242,7 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 - **SSOT**（单一事实源）：所有数据存储在 `~/.cc-switch/cc-switch.db`（SQLite）
 - **双层存储**：SQLite 存储可同步数据，JSON 存储设备级设置
 - **双向同步**：切换时写入 live 文件，编辑当前供应商时从 live 回填
-- **原子写入**：临时文件 + 重命名模式防止配置损坏
+- **原子写入**：临时文件 + 重命名模式防止配置损坏（Windows 上使用 `ReplaceFileW`）
 - **并发安全**：Mutex 保护的数据库连接避免竞态条件
 - **分层架构**：清晰分离（Commands → Services → DAO → Database）
 
@@ -265,8 +263,8 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 ### 环境要求
 
 - Node.js 18+
-- pnpm 8+
-- Rust 1.88+
+- pnpm 10+（版本由 `package.json` 的 `packageManager` 锁定，推荐 `corepack enable`）
+- Rust 1.88+（本仓库 `rust-toolchain.toml` 钉在 1.95）
 - Tauri CLI 2.8+
 
 ### 开发命令
@@ -346,7 +344,7 @@ pnpm test:unit --coverage
 
 **前端**：React 18 · TypeScript · Vite · TailwindCSS 3.4 · TanStack Query v5 · react-i18next · react-hook-form · zod · shadcn/ui · @dnd-kit
 
-**后端**：Tauri 2.8 · Rust · serde · tokio · thiserror · tauri-plugin-process/dialog/store/log
+**后端**：Tauri 2.8 · Rust · serde · tokio · thiserror · tauri-plugin-process/dialog/store/log/deep-link
 
 **测试**：vitest · MSW · @testing-library/react
 
@@ -360,11 +358,13 @@ pnpm test:unit --coverage
 │   ├── components/
 │   │   ├── providers/          # 供应商管理
 │   │   ├── mcp/                # MCP 面板
-│   │   ├── prompts/            # Prompts 管理
+│   │   ├── prompts/            # Prompts 管理（含 Pi 原生提示）
 │   │   ├── skills/             # Skills 管理
 │   │   ├── sessions/           # 会话管理器
 │   │   ├── proxy/              # Proxy 模式面板
 │   │   ├── openclaw/           # OpenClaw 配置面板
+│   │   ├── workspace/          # OpenClaw 工作区
+│   │   ├── profiles/           # 项目/工作区切换
 │   │   ├── settings/           # 设置（终端/备份/关于）
 │   │   ├── deeplink/           # Deep Link 导入
 │   │   ├── env/                # 环境变量管理
@@ -375,7 +375,7 @@ pnpm test:unit --coverage
 │   ├── lib/
 │   │   ├── api/                # Tauri API 封装（类型安全）
 │   │   └── query/              # TanStack Query 配置
-│   ├── locales/                # 翻译 (zh/zh-TW/en/ja)
+│   ├── i18n/locales/           # 翻译 (zh/zh-TW/en/ja)
 │   ├── config/                 # 预设 (providers/mcp)
 │   └── types/                  # TypeScript 类型定义
 ├── src-tauri/                  # 后端 (Rust)
@@ -386,7 +386,8 @@ pnpm test:unit --coverage
 │       ├── proxy/              # Proxy 模块
 │       ├── session_manager/    # 会话管理
 │       ├── deeplink/           # Deep Link 处理
-│       └── mcp/                # MCP 同步模块
+│       ├── mcp/                # MCP 同步模块
+│       └── pi_config/          # Pi models.json 适配
 ├── tests/                      # 前端测试
 └── assets/                     # 截图 & 合作商资源
 ```
@@ -415,7 +416,7 @@ pnpm test:unit --coverage
 
 Grok Build 全局配置工作流参考了 MIT 许可的 [2836048681/cc-switch-codexcont](https://github.com/2836048681/cc-switch-codexcont)，并按本发行版仅 Responses 的代理路由、数据库所有的 MCP 投影和既有事务备份模型重新适配。
 
-赞助商列表由上游维护（本发行版不再镜像）：[上游赞助商](https://github.com/farion1231/cc-switch/blob/main/README_ZH.md).
+赞助商列表由上游维护（本发行版不再镜像）：[上游赞助商](https://github.com/farion1231/cc-switch/blob/main/README_ZH.md)。
 
 ## License
 

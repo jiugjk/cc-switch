@@ -8,7 +8,7 @@ CC Switch is an open-source project maintained by volunteers. We're happy to hel
 
 ### Before Asking
 
-1. **Read the [FAQ](https://github.com/jiugjk/cc-switch#faq)** — most common questions are answered there.
+1. **Read the [FAQ](https://github.com/jiugjk/cc-switch/blob/main/README_EN.md#faq)** — most common questions are answered there. The repo homepage README is Chinese.
 2. **Search [existing issues](https://github.com/jiugjk/cc-switch/issues)** (including closed ones) — someone may have had the same question.
 
 ### Asking a Question
