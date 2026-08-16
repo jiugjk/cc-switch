@@ -45,9 +45,18 @@ function renderWithQueryClient(ui: ReactElement) {
     defaultOptions: { queries: { retry: false } },
   });
 
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
   );
+
+  return {
+    ...view,
+    queryClient,
+    rerender: (nextUi: ReactElement) =>
+      view.rerender(
+        <QueryClientProvider client={queryClient}>{nextUi}</QueryClientProvider>,
+      ),
+  };
 }
 
 vi.mock("@/components/providers/forms/ProviderForm", () => ({
@@ -200,7 +209,7 @@ describe("AddProviderDialog", () => {
       },
     };
 
-    render(
+    renderWithQueryClient(
       <AddProviderDialog
         open
         onOpenChange={vi.fn()}
@@ -233,7 +242,9 @@ describe("AddProviderDialog", () => {
       appId: "codex" as const,
       onSubmit: vi.fn(),
     };
-    const { rerender } = render(<AddProviderDialog open {...props} />);
+    const { rerender } = renderWithQueryClient(
+      <AddProviderDialog open {...props} />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "manage-auth" }));
     expect(screen.getByTestId("auth-settings-panel")).toHaveTextContent(
