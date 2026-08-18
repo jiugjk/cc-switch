@@ -20,7 +20,7 @@
 
 ## 关于此独立发行版
 
-这是一个独立维护的 Windows 发行版，基于 MIT 许可的 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，拥有独立发布节奏。当前版本为 **v3.19.2**，并已合并后续上游提交（含 **Pi** 原生编码代理）。在上游基础上，本发行版额外提供：
+这是一个独立维护的 Windows 发行版，基于 MIT 许可的 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)，拥有独立发布节奏。当前版本为 **v3.20.0**（含 **Pi** 原生编码代理）。在上游基础上，本发行版额外提供：
 
 ### CodexCont 与代理
 
@@ -67,7 +67,7 @@
 
 ## 功能特性
 
-[完整更新日志](CHANGELOG.md) | [发布说明](docs/release-notes/v3.19.2-zh.md)
+[完整更新日志](CHANGELOG.md) | [发布说明](docs/release-notes/v3.20.0-zh.md)
 
 ### 供应商管理
 
@@ -212,7 +212,7 @@ Pi 接入边界见 [Pi 原生契约](docs/pi-native-contract-zh.md)。Grok Build
 > **说明**
 > - **未代码签名**：Windows SmartScreen 可能提示，选「仍要运行」即可。
 > - **无自动更新通道**：本发行版已移除应用内更新器（`createUpdaterArtifacts` 为 false、无 `plugins.updater` 配置、无签名密钥），「检查更新」会打开本发行版发布页手动下载。
-> - 自动构建标签形如 `v3.19.2-windows.<run_number>`，并指向实际构建的提交。
+> - 自动构建标签形如 `v3.20.0-windows.<run_number>`，并指向实际构建的提交。
 
 <details>
 <summary><strong>架构总览</strong></summary>
