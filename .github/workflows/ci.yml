@@ -140,7 +140,12 @@ jobs:
       - name: cargo audit
         # rust_decimal lists rkyv 0.7 as an optional dependency in Cargo.lock,
         # but this project does not enable that feature (`cargo tree -i rkyv` is empty).
-        run: cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2026-0235
+        # RUSTSEC-2024-0429 / RUSTSEC-2026-0097: rand 0.7/0.8 reach us only as
+        # build-dependencies of tauri-utils (kuchikiki -> selectors/phf 0.8 and
+        # cssparser/phf 0.10); they never enter the runtime binary and the unsound
+        # path (custom logger + rand::rng()) cannot trigger in build scripts.
+        # Drop these ignores once tauri-utils ships a kuchikiki without them.
+        run: cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2026-0235 --ignore RUSTSEC-2024-0429 --ignore RUSTSEC-2026-0097
 
   backend:
     name: Backend Checks
