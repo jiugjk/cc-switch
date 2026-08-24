@@ -261,6 +261,21 @@ CC Switch 支持英文、简体中文、繁体中文和日文。修改用户可�
 2. 所有 UI 文本使用 i18next 的 `t()` 函数。
 3. 不要硬编码用户可见的字符串。
 
+## Syncing upstream (this fork)
+
+Do **not** use GitHub's "Sync fork" / "Update branch" button. It will conflict
+on the README rewrite and the deleted DE/JA + partner files every time.
+
+```bash
+bash scripts/sync-upstream.sh        # merge farion1231/cc-switch:main
+bash scripts/sync-upstream.sh --push # then push the current branch
+```
+
+The script keeps this fork's READMEs and dropped partner/workflow files, and
+takes every other upstream change. Real code conflicts still stop the merge.
+
+A daily `Sync upstream` workflow opens a pre-resolved PR when upstream moves.
+
 ## 有疑问？
 
 - [提问](https://github.com/jiugjk/cc-switch/issues/new?template=question.yml)

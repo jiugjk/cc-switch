@@ -42,6 +42,7 @@
 ### 构建
 
 - **免费 Windows 自动构建** — GitHub Actions 在 `main` 的 **CI 通过后**（或在 `main` 上手动 `workflow_dispatch`）于免费托管 runner 上构建**未签名** NSIS / MSI / 便携版。本发行版**不发布** macOS/Linux 安装包，也无代码签名 / 自动更新通道。
+- **合上游** — 不要用 GitHub「Sync fork」。跑 `bash scripts/sync-upstream.sh`（或等每日 `Sync upstream` workflow），赞助商/多语言 README 冲突会自动丢掉。
 
 用户侧开放确认：代理开/关的真实请求矩阵；接管开启时确认 ChatGPT 桌面流量进入 `127.0.0.1:15721` `/v1/responses`。
 

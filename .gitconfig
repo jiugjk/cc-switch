@@ -1,0 +1,6 @@
+# Shared by scripts/sync-upstream.sh (and anyone who runs
+# `git config include.path ../.gitconfig` from this repo).
+# Makes the `merge=ours` driver in .gitattributes actually work.
+[merge "ours"]
+	name = keep this fork's version
+	driver = true

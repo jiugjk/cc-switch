@@ -1,0 +1,75 @@
+name: Sync upstream
+
+# Pre-resolve the README / partner-asset conflicts this fork always hits
+# when farion1231/cc-switch updates sponsor copy, then open a PR.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge farion1231/cc-switch
+    runs-on: ubuntu-latest
+    if: github.repository == 'jiugjk/cc-switch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config merge.ours.driver true
+
+      - name: Merge upstream
+        id: merge
+        run: |
+          before="$(git rev-parse HEAD)"
+          bash scripts/sync-upstream.sh
+          after="$(git rev-parse HEAD)"
+          if [[ "$before" == "$after" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "head=$after" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push branch
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          git checkout -B sync/upstream
+          git push -u origin sync/upstream --force
+
+      - name: Open or update PR
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr view sync/upstream --json number --jq .number >/dev/null 2>&1; then
+            gh pr edit sync/upstream --title "chore: sync farion1231/cc-switch" --body "$(cat <<'EOF'
+          Automated upstream sync.
+
+          Known README / partner-asset / dropped-workflow conflicts were resolved by `scripts/sync-upstream.sh` (keep this fork's docs; take upstream code).
+          EOF
+          )"
+          else
+            gh pr create --base main --head sync/upstream \
+              --title "chore: sync farion1231/cc-switch" \
+              --body "$(cat <<'EOF'
+          Automated upstream sync.
+
+          Known README / partner-asset / dropped-workflow conflicts were resolved by `scripts/sync-upstream.sh` (keep this fork's docs; take upstream code).
+          EOF
+          )"
+          fi

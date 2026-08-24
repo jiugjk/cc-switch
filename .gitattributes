@@ -25,6 +25,15 @@
 # Shell scripts
 *.sh text eol=lf
 
+# This fork owns these READMEs. Upstream sponsor / locale edits must not
+# leak back on merge. Requires: git config merge.ours.driver true
+# (scripts/sync-upstream.sh sets this automatically.)
+README.md merge=ours
+README_ZH.md merge=ours
+README_EN.md merge=ours
+README_DE.md merge=ours
+README_JA.md merge=ours
+
 # Denote all files that are truly binary and should not be modified.
 *.png binary
 *.jpg binary
