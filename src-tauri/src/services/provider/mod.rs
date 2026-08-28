@@ -5997,13 +5997,8 @@ impl ProviderService {
         // Update already holds the per-app switch lock for serialization. A
         // leftover backup row is not ownership; only live placeholders or a
         // running proxy with an enabled flag may divert the live write.
-        let should_sync_via_proxy = live::proxy_owns_live_config(
-            state,
-            &app_type,
-            has_live_backup,
-            live_taken_over,
-            true,
-        );
+        let should_sync_via_proxy =
+            live::proxy_owns_live_config(state, &app_type, has_live_backup, live_taken_over, true);
 
         if should_sync_via_proxy {
             let proxy_running = futures::executor::block_on(state.proxy_service.is_running());
