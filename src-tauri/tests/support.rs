@@ -74,6 +74,14 @@ pub fn test_mutex() -> &'static Mutex<()> {
     MUTEX.get_or_init(|| Mutex::new(()))
 }
 
+/// Recover from a poisoned lock so one failing test cannot cascade.
+#[allow(dead_code)]
+pub fn lock_test_mutex() -> std::sync::MutexGuard<'static, ()> {
+    test_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 创建测试用的 AppState，包含一个空的数据库
 #[allow(dead_code)]
 pub fn create_test_state() -> Result<AppState, Box<dyn std::error::Error>> {
