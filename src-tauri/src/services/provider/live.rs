@@ -1740,11 +1740,12 @@ pub(crate) enum LiveSyncOutcome {
 /// A backup row by itself is not evidence: stale rows survive crashes and failed
 /// restores. Likewise, an enabled flag left behind by an interrupted teardown
 /// must not suppress a real live write unless there is corroborating evidence.
-fn proxy_owns_live_config(
+pub(crate) fn proxy_owns_live_config(
     state: &AppState,
     app_type: &AppType,
     has_live_backup: bool,
     live_taken_over: bool,
+    holding_switch_lock: bool,
 ) -> bool {
     if live_taken_over {
         return true;
@@ -1773,6 +1774,13 @@ fn proxy_owns_live_config(
         && futures::executor::block_on(state.proxy_service.is_running())
     {
         return true;
+    }
+
+    // Holding the per-app lock for serialization (provider update) is not
+    // evidence of an in-flight takeover. A leftover backup row must not divert
+    // the live write in that case.
+    if holding_switch_lock {
+        return false;
     }
 
     has_live_backup
@@ -1804,7 +1812,7 @@ pub(crate) fn sync_live_for_provider_respecting_takeover(
         .proxy_service
         .detect_takeover_in_live_config_for_app(app_type);
 
-    if !proxy_owns_live_config(state, app_type, has_live_backup, live_taken_over) {
+    if !proxy_owns_live_config(state, app_type, has_live_backup, live_taken_over, false) {
         // A stale backup must follow the provider too, otherwise a later restore
         // can resurrect the old URL and undo the live write we are making now.
         if has_live_backup {

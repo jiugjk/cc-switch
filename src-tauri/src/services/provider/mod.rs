@@ -5994,10 +5994,16 @@ impl ProviderService {
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
-        // Backup or live placeholders mean the live file is currently owned by
-        // proxy takeover, including the short activation window before
-        // proxy_config.enabled is committed.
-        let should_sync_via_proxy = has_live_backup || live_taken_over;
+        // Update already holds the per-app switch lock for serialization. A
+        // leftover backup row is not ownership; only live placeholders or a
+        // running proxy with an enabled flag may divert the live write.
+        let should_sync_via_proxy = live::proxy_owns_live_config(
+            state,
+            &app_type,
+            has_live_backup,
+            live_taken_over,
+            true,
+        );
 
         if should_sync_via_proxy {
             let proxy_running = futures::executor::block_on(state.proxy_service.is_running());
@@ -6077,8 +6083,27 @@ impl ProviderService {
         }
         let rollback = ProviderUpdateRollbackState {
             live_files: Some(live::LiveFilesSnapshot::capture(&app_type)?),
-            ..Default::default()
+            live_backup: if has_live_backup {
+                Some(previous_live_backup)
+            } else {
+                None
+            },
         };
+        if has_live_backup {
+            if let Err(error) = futures::executor::block_on(
+                state.proxy_service.update_live_backup_from_provider_inner(
+                    app_type.as_str(),
+                    &provider,
+                    None,
+                ),
+            ) {
+                return Err(rollback.rollback_error(
+                    state,
+                    &app_type,
+                    AppError::Message(format!("更新 Live 备份失败: {error}")),
+                ));
+            }
+        }
         if let Err(error) = write_live_with_common_config_for_state(state, &app_type, &provider) {
             return Err(rollback.rollback_error(state, &app_type, error));
         }
