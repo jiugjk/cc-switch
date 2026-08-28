@@ -188,12 +188,11 @@ mod tests {
     use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
     use crate::database::Database;
     use crate::provider::{
-        AuthBinding, AuthBindingSource, ClaudeModelConfig, ProviderMeta, UniversalProvider,
-        UsageScript,
+        AuthBinding, AuthBindingSource, ClaudeModelConfig, CodexModelConfig, ProviderMeta,
+        UniversalProvider, UsageScript,
     };
     #[cfg(any(target_os = "macos", windows))]
     use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute};
-    use crate::provider::{CodexModelConfig, UniversalProvider};
     use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
     use serde_json::json;
