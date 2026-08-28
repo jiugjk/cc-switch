@@ -6084,7 +6084,7 @@ impl ProviderService {
                 None
             },
         };
-        if has_live_backup {
+        if has_live_backup && !matches!(app_type, AppType::ClaudeDesktop) {
             if let Err(error) = futures::executor::block_on(
                 state.proxy_service.update_live_backup_from_provider_inner(
                     app_type.as_str(),

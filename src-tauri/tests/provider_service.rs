@@ -3907,7 +3907,14 @@ fn provider_service_switch_codex_preserves_db_auth_when_auth_file_is_deleted() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let live_config = "model_provider = \"custom\"\nmodel = \"gpt-5-live\"\n";
+    let live_config = r#"model_provider = "custom"
+model = "gpt-5-live"
+
+[model_providers.custom]
+name = "custom"
+base_url = "https://api.live.example/v1"
+wire_api = "responses"
+"#;
     let config_path = cc_switch_lib::get_codex_config_path();
     std::fs::create_dir_all(config_path.parent().expect("codex dir"))
         .expect("create Codex config dir");
@@ -3931,7 +3938,7 @@ fn provider_service_switch_codex_preserves_db_auth_when_auth_file_is_deleted() {
                 "Old".to_string(),
                 json!({
                     "auth": { "OPENAI_API_KEY": "old-secret" },
-                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5-old\"\n"
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5-old\"\n\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://api.old.example/v1\"\nwire_api = \"responses\"\n"
                 }),
                 None,
             ),
@@ -3943,7 +3950,7 @@ fn provider_service_switch_codex_preserves_db_auth_when_auth_file_is_deleted() {
                 "New".to_string(),
                 json!({
                     "auth": { "OPENAI_API_KEY": "new-secret" },
-                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5-new\"\n"
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5-new\"\n\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://api.new.example/v1\"\nwire_api = \"responses\"\n"
                 }),
                 None,
             ),

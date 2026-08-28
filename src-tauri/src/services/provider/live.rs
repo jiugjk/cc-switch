@@ -1751,6 +1751,13 @@ pub(crate) fn proxy_owns_live_config(
         return true;
     }
 
+    // Claude Desktop takeover is marked by a backup row, not live placeholders.
+    // Provider update already holds the per-app lock, so the generic
+    // switch-in-progress check below cannot be used as evidence.
+    if matches!(app_type, AppType::ClaudeDesktop) && has_live_backup {
+        return true;
+    }
+
     let takeover_enabled =
         match futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str())) {
             Ok(config) => config.enabled,
