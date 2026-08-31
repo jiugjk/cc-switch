@@ -3179,6 +3179,50 @@ fn normalize_codex_legacy_openai_reroute(config_text: &str) -> Result<Option<Str
     Ok(Some(doc.to_string()))
 }
 
+/// Flip a proxy-managed OAuth card's `requires_openai_auth = true` to
+/// `false` on the active custom provider table.
+///
+/// Such cards (xai_oauth, github_copilot, …) are keyless by design — the
+/// local proxy injects the real token per request, and the stored config is
+/// only a snapshot of the upstream shape — yet their presets inherited the
+/// pre-0.149 template's `requires_openai_auth = true`. Left in place, the
+/// keyless safety gate rightly refuses the switch
+/// (`provider.codex.config.official_auth_fallback`), and on disk the flag
+/// would either send a preserved official login to the third-party endpoint
+/// or trap Codex on the login screen. Forcing `false` makes the snapshot
+/// honest about its keyless state: 0.149 resolves the provider as
+/// unauthenticated and never reads auth.json, so the gate passes on its own
+/// merits instead of being exempted. Callers gate on
+/// `Provider::uses_proxy_injected_oauth` — `codex_oauth` cards must never
+/// come through here, the official login IS their credential.
+///
+/// Returns `Some(updated)` only when the flag was an explicit `true`;
+/// absent/false flags, non-custom routing, and unparsable TOML pass through
+/// unchanged (`None`) so downstream validators keep ownership of errors.
+pub fn neutralize_codex_official_auth_fallback_for_proxy_oauth(
+    config_text: &str,
+) -> Option<String> {
+    let mut doc = config_text.parse::<DocumentMut>().ok()?;
+    let provider_id = active_codex_model_provider_id(&doc)?;
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return None;
+    }
+    let provider_table = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|table| table.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_like_mut())?;
+    if provider_table
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        != Some(true)
+    {
+        return None;
+    }
+    provider_table.insert("requires_openai_auth", toml_edit::value(false));
+    Some(doc.to_string())
+}
+
 /// Align the active custom provider table's `requires_openai_auth` with the
 /// login-preservation setting on a third-party switch.
 ///
@@ -5183,6 +5227,48 @@ http_headers = { Authorization = "Bearer explicit-header-token" }
             assert!(
                 !codex_config_falls_back_to_official_auth_for_third_party(safe),
                 "shape must not be flagged:\n{safe}"
+            );
+        }
+    }
+
+    #[test]
+    fn neutralize_proxy_oauth_fallback_flips_only_active_custom_true() {
+        // The managed-OAuth preset snapshot (keyless card carrying the legacy
+        // template flag): flagged by the gate as-is, clean once neutralized.
+        let poisoned = "model_provider = \"custom\"\nmodel = \"grok-4.5\"\n\n[model_providers.custom]\nname = \"xai\"\nbase_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
+        let neutralized = neutralize_codex_official_auth_fallback_for_proxy_oauth(poisoned)
+            .expect("explicit true on the active custom table must be flipped");
+        assert!(neutralized.contains("requires_openai_auth = false"));
+        assert!(codex_config_falls_back_to_official_auth_for_third_party(
+            poisoned
+        ));
+        assert!(!codex_config_falls_back_to_official_auth_for_third_party(
+            &neutralized
+        ));
+        // Idempotent: the neutralized snapshot passes through unchanged.
+        assert!(neutralize_codex_official_auth_fallback_for_proxy_oauth(&neutralized).is_none());
+
+        // Inline-table containers must be reachable too (as_table_like, not
+        // as_table — the recurring 0.149 inline-table lesson).
+        let inline = "model_provider = \"custom\"\nmodel_providers = { custom = { base_url = \"https://api.x.ai/v1\", requires_openai_auth = true } }\n";
+        let inline_neutralized = neutralize_codex_official_auth_fallback_for_proxy_oauth(inline)
+            .expect("inline provider table must be neutralized");
+        assert!(inline_neutralized.contains("requires_openai_auth = false"));
+
+        for untouched in [
+            // absent flag — already the safe keyless shape
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"https://api.x.ai/v1\"\n",
+            // built-in routing / top-level reroute: the gate keeps ownership
+            // of those shapes, this function only mends the active custom table
+            "model_provider = \"openai\"\nopenai_base_url = \"https://relay.example/v1\"\n",
+            "openai_base_url = \"https://relay.example/v1\"\n",
+            // missing table / unparsable TOML: downstream validators report
+            "model_provider = \"custom\"\n",
+            "model_provider = [",
+        ] {
+            assert!(
+                neutralize_codex_official_auth_fallback_for_proxy_oauth(untouched).is_none(),
+                "shape must pass through unchanged:\n{untouched}"
             );
         }
     }

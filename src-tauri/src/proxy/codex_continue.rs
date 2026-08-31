@@ -6,7 +6,10 @@
 use super::{
     forwarder::{ActiveConnectionGuard, RequestForwarder},
     hyper_client::ProxyResponse,
-    providers::{provider_needs_responses_namespace_flatten, transform_codex_responses_namespace},
+    providers::{
+        provider_needs_responses_namespace_flatten, transform_codex_responses_namespace,
+        transform_codex_responses_xai_sanitize,
+    },
     sse::{append_utf8_safe, strip_sse_field, take_sse_block},
 };
 use crate::{app_config::AppType, provider::Provider};
@@ -849,6 +852,9 @@ fn fold_responses_stream(
                                     &mut ev,
                                     &namespace_restore_map,
                                 );
+                                transform_codex_responses_xai_sanitize::normalize_xai_function_call_integer_arguments(
+                                    &mut ev,
+                                );
                             }
                             let t = event_type(&ev).to_string();
                             if t == "error" {
@@ -940,6 +946,9 @@ fn fold_responses_stream(
                             transform_codex_responses_namespace::restore_sse_event_namespaces(
                                 &mut ev,
                                 &namespace_restore_map,
+                            );
+                            transform_codex_responses_xai_sanitize::normalize_xai_function_call_integer_arguments(
+                                &mut ev,
                             );
                         }
                         if event_type(&ev) == "error" {
