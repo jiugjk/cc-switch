@@ -1362,6 +1362,125 @@ requires_openai_auth = true`,
     icon: "bailian",
     iconColor: "#624AFF",
   },
+  // ===== QwenCloud（DashScope 国际站）=====
+  // 三条线的 base_url 与密钥互不通用，且协议档位不同：
+  // 按量付费与 Token Plan 走 /compatible-mode/v1 原生 Responses；
+  // Coding Plan 的地址是 /v1（没有 compatible-mode 段），官方明示只支持
+  // Chat Completions，故单独标 openai_chat 让后端改写 wire_api。
+  {
+    name: "QwenCloud",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "qwencloud",
+      "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "qwen3.7-max",
+    ),
+    endpointCandidates: [
+      "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    ],
+    apiFormat: "openai_responses",
+    modelCatalog: modelCatalog([
+      {
+        model: "qwen3.7-max",
+        displayName: "Qwen3.7 Max",
+        contextWindow: 1000000,
+        inputModalities: ["text"],
+      },
+      {
+        model: "qwen3.7-plus",
+        displayName: "Qwen3.7 Plus",
+        contextWindow: 1000000,
+      },
+      {
+        model: "qwen3.6-plus",
+        displayName: "Qwen3.6 Plus",
+        contextWindow: 1000000,
+      },
+    ]),
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+  },
+  {
+    name: "QwenCloud For Coding",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "qwencloud_coding",
+      "https://coding-intl.dashscope.aliyuncs.com/v1",
+      "qwen3.7-plus",
+    ),
+    endpointCandidates: ["https://coding-intl.dashscope.aliyuncs.com/v1"],
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "qwen3.7-plus",
+        displayName: "Qwen3.7 Plus",
+        contextWindow: 1000000,
+      },
+      {
+        model: "qwen3.6-plus",
+        displayName: "Qwen3.6 Plus",
+        contextWindow: 1000000,
+      },
+      {
+        model: "qwen3-coder-plus",
+        displayName: "Qwen3 Coder Plus",
+        contextWindow: 131072,
+        inputModalities: ["text"],
+      },
+    ]),
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+  },
+  {
+    name: "QwenCloud Token Plan",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "qwencloud_token_plan",
+      "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+      "qwen3.8-max",
+    ),
+    endpointCandidates: [
+      "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    ],
+    apiFormat: "openai_responses",
+    // 档位与窗口照抄官方 Codex model-catalogs.json（qwen3.8 系只收
+    // low/medium/xhigh，默认 xhigh；无 high 档，勿按常规四档补齐）
+    modelCatalog: modelCatalog([
+      {
+        model: "qwen3.8-max",
+        displayName: "Qwen3.8 Max",
+        contextWindow: 983616,
+        supportsParallelToolCalls: false,
+        reasoningLevels: ["low", "medium", "xhigh"],
+        defaultReasoningLevel: "xhigh",
+      },
+      {
+        model: "qwen3.8-flash",
+        displayName: "Qwen3.8 Flash",
+        contextWindow: 983616,
+        supportsParallelToolCalls: false,
+        reasoningLevels: ["low", "medium", "xhigh"],
+        defaultReasoningLevel: "xhigh",
+      },
+      {
+        model: "qwen3.7-max",
+        displayName: "Qwen3.7 Max",
+        contextWindow: 1000000,
+        inputModalities: ["text"],
+      },
+    ]),
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+  },
   {
     name: "Tencent Hunyuan",
     websiteUrl: "https://cloud.tencent.com/product/tokenhub",

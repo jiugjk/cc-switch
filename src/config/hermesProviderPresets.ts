@@ -1526,6 +1526,83 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
       model: { default: "qwen3-coder-plus", provider: "bailian_coding" },
     },
   },
+  // ===== QwenCloud（DashScope 国际站）=====
+  // 三条线都用 anthropic_messages；地址不带 /v1（与官方 hermes 文档一致，
+  // 这点和 OpenCode / OpenClaw 的 /apps/anthropic/v1 不同，勿互相照搬）。
+  {
+    name: "QwenCloud",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      name: "qwencloud",
+      base_url: "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+      api_key: "",
+      api_mode: "anthropic_messages",
+      models: [
+        { id: "qwen3.7-max", name: "Qwen3.7 Max", context_length: 1000000 },
+        { id: "qwen3.7-plus", name: "Qwen3.7 Plus", context_length: 1000000 },
+        { id: "qwen3.6-plus", name: "Qwen3.6 Plus", context_length: 1000000 },
+      ],
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    suggestedDefaults: {
+      model: { default: "qwen3.7-max", provider: "qwencloud" },
+    },
+  },
+  {
+    name: "QwenCloud For Coding",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      name: "qwencloud_coding",
+      base_url: "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
+      api_key: "",
+      api_mode: "anthropic_messages",
+      models: [
+        { id: "qwen3.7-plus", name: "Qwen3.7 Plus", context_length: 1000000 },
+        { id: "qwen3.6-plus", name: "Qwen3.6 Plus", context_length: 1000000 },
+        {
+          id: "qwen3-coder-plus",
+          name: "Qwen3 Coder Plus",
+          context_length: 131072,
+        },
+      ],
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    suggestedDefaults: {
+      model: { default: "qwen3.7-plus", provider: "qwencloud_coding" },
+    },
+  },
+  {
+    name: "QwenCloud Token Plan",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      name: "qwencloud_token_plan",
+      base_url:
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+      api_key: "",
+      api_mode: "anthropic_messages",
+      models: [
+        { id: "qwen3.8-max", name: "Qwen3.8 Max", context_length: 983616 },
+        { id: "qwen3.8-flash", name: "Qwen3.8 Flash", context_length: 983616 },
+        { id: "qwen3.7-max", name: "Qwen3.7 Max", context_length: 1000000 },
+        { id: "qwen3.7-plus", name: "Qwen3.7 Plus", context_length: 1000000 },
+        { id: "qwen3.6-plus", name: "Qwen3.6 Plus", context_length: 1000000 },
+        { id: "qwen3.6-flash", name: "Qwen3.6 Flash", context_length: 1000000 },
+      ],
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    suggestedDefaults: {
+      model: { default: "qwen3.8-max", provider: "qwencloud_token_plan" },
+    },
+  },
   {
     name: "StepFun",
     websiteUrl: "https://platform.stepfun.ai",

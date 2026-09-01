@@ -2587,6 +2587,212 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
       modelCatalog: { "qwen/qwen3.5-plus": { alias: "Qwen" } },
     },
   },
+  // ===== QwenCloud（DashScope 国际站）=====
+  // 三条线都走 anthropic-messages，地址比 Claude Code 的多一段 /v1。
+  // modelCatalog 必须逐条覆盖 models：OpenClaw 把 agents.defaults.models
+  // 当白名单，漏写的模型会在客户端里被隐藏。
+  {
+    name: "QwenCloud",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      baseUrl: "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1",
+      apiKey: "",
+      api: "anthropic-messages",
+      models: [
+        {
+          id: "qwen3.7-max",
+          name: "Qwen3.7 Max",
+          input: ["text"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+        {
+          id: "qwen3.7-plus",
+          name: "Qwen3.7 Plus",
+          input: ["text", "image"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+        {
+          id: "qwen3.6-plus",
+          name: "Qwen3.6 Plus",
+          input: ["text", "image"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+      ],
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    templateValues: {
+      baseUrl: {
+        label: "Base URL",
+        placeholder: "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1",
+        defaultValue: "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+    suggestedDefaults: {
+      model: { primary: "qwencloud/qwen3.7-max" },
+      modelCatalog: {
+        "qwencloud/qwen3.7-max": { alias: "Qwen3.7 Max" },
+        "qwencloud/qwen3.7-plus": { alias: "Qwen3.7 Plus" },
+        "qwencloud/qwen3.6-plus": { alias: "Qwen3.6 Plus" },
+      },
+    },
+  },
+  {
+    name: "QwenCloud For Coding",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      baseUrl: "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
+      apiKey: "",
+      api: "anthropic-messages",
+      models: [
+        {
+          id: "qwen3.7-plus",
+          name: "Qwen3.7 Plus",
+          input: ["text", "image"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+        {
+          id: "qwen3.6-plus",
+          name: "Qwen3.6 Plus",
+          input: ["text", "image"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+        {
+          id: "qwen3-coder-plus",
+          name: "Qwen3 Coder Plus",
+          input: ["text"],
+          contextWindow: 131072,
+          maxTokens: 65536,
+        },
+      ],
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    templateValues: {
+      baseUrl: {
+        label: "Base URL",
+        placeholder:
+          "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
+        defaultValue:
+          "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+    suggestedDefaults: {
+      model: { primary: "qwencloud-coding/qwen3.7-plus" },
+      modelCatalog: {
+        "qwencloud-coding/qwen3.7-plus": { alias: "Qwen3.7 Plus" },
+        "qwencloud-coding/qwen3.6-plus": { alias: "Qwen3.6 Plus" },
+        "qwencloud-coding/qwen3-coder-plus": { alias: "Qwen3 Coder Plus" },
+      },
+    },
+  },
+  {
+    name: "QwenCloud Token Plan",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      baseUrl:
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
+      apiKey: "",
+      api: "anthropic-messages",
+      models: [
+        {
+          id: "qwen3.8-max",
+          name: "Qwen3.8 Max",
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: 983616,
+          maxTokens: 131072,
+        },
+        {
+          id: "qwen3.8-flash",
+          name: "Qwen3.8 Flash",
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: 983616,
+          maxTokens: 131072,
+        },
+        {
+          id: "qwen3.7-max",
+          name: "Qwen3.7 Max",
+          input: ["text"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+        {
+          id: "qwen3.7-plus",
+          name: "Qwen3.7 Plus",
+          input: ["text", "image"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+        {
+          id: "qwen3.6-plus",
+          name: "Qwen3.6 Plus",
+          input: ["text", "image"],
+          contextWindow: 1000000,
+          maxTokens: 65536,
+        },
+        {
+          id: "qwen3.6-flash",
+          name: "Qwen3.6 Flash",
+          input: ["text", "image"],
+          contextWindow: 1000000,
+          maxTokens: 32768,
+        },
+      ],
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    templateValues: {
+      baseUrl: {
+        label: "Base URL",
+        placeholder:
+          "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
+        defaultValue:
+          "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+    suggestedDefaults: {
+      model: { primary: "qwencloud-token-plan/qwen3.8-max" },
+      modelCatalog: {
+        "qwencloud-token-plan/qwen3.8-max": { alias: "Qwen3.8 Max" },
+        "qwencloud-token-plan/qwen3.8-flash": { alias: "Qwen3.8 Flash" },
+        "qwencloud-token-plan/qwen3.7-max": { alias: "Qwen3.7 Max" },
+        "qwencloud-token-plan/qwen3.7-plus": { alias: "Qwen3.7 Plus" },
+        "qwencloud-token-plan/qwen3.6-plus": { alias: "Qwen3.6 Plus" },
+        "qwencloud-token-plan/qwen3.6-flash": { alias: "Qwen3.6 Flash" },
+      },
+    },
+  },
   {
     name: "StepFun",
     websiteUrl: "https://platform.stepfun.com/step-plan",

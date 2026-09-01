@@ -1777,6 +1777,128 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
       },
     },
   },
+  // ===== QwenCloud（DashScope 国际站）=====
+  // 按量付费走 OpenAI 兼容层；Coding / Token Plan 官方给的是 Anthropic
+  // 协议地址，且比 Claude Code 的地址多一段 /v1（AI SDK anthropic 的惯例）。
+  {
+    name: "QwenCloud",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "QwenCloud",
+      options: {
+        baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "qwen3.7-max": { name: "Qwen3.7 Max" },
+        "qwen3.7-plus": { name: "Qwen3.7 Plus" },
+        "qwen3.6-plus": { name: "Qwen3.6 Plus" },
+      },
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    templateValues: {
+      baseURL: {
+        label: "Base URL",
+        placeholder: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        defaultValue: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "QwenCloud For Coding",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "QwenCloud For Coding",
+      options: {
+        baseURL: "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "qwen3.7-plus": { name: "Qwen3.7 Plus" },
+        "qwen3.6-plus": { name: "Qwen3.6 Plus" },
+        "qwen3-coder-plus": { name: "Qwen3 Coder Plus" },
+      },
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    templateValues: {
+      baseURL: {
+        label: "Base URL",
+        placeholder:
+          "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
+        defaultValue:
+          "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "QwenCloud Token Plan",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "QwenCloud Token Plan",
+      options: {
+        baseURL:
+          "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "qwen3.8-max": {
+          name: "Qwen3.8 Max",
+          limit: { context: 983616, output: 131072 },
+        },
+        "qwen3.8-flash": {
+          name: "Qwen3.8 Flash",
+          limit: { context: 983616, output: 131072 },
+        },
+        "qwen3.7-max": { name: "Qwen3.7 Max" },
+        "qwen3.7-plus": { name: "Qwen3.7 Plus" },
+        "qwen3.6-plus": { name: "Qwen3.6 Plus" },
+        "qwen3.6-flash": { name: "Qwen3.6 Flash" },
+      },
+    },
+    category: "cn_official",
+    icon: "qwen",
+    iconColor: "#6336E7",
+    templateValues: {
+      baseURL: {
+        label: "Base URL",
+        placeholder:
+          "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
+        defaultValue:
+          "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+  },
   {
     name: "StepFun",
     websiteUrl: "https://platform.stepfun.com/step-plan",
